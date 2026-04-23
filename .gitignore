@@ -9,3 +9,4 @@ build/
 dist/
 output/*.json
 data/backtest_cache/
+output/*.csv
