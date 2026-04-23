@@ -17,6 +17,15 @@ def _zero_costs(monkeypatch, request):
     monkeypatch.setattr(cfg, "SLIPPAGE_BPS", 0.0)
 
 
+@pytest.fixture(autouse=True)
+def _no_defer(monkeypatch, request):
+    """Legacy tests assume EXIT fires the next open; disable D-BT25 defer unless
+    the test opts in via `@pytest.mark.with_defer`."""
+    if "with_defer" in request.keywords:
+        return
+    monkeypatch.setattr(cfg, "EXIT_DEFER_DAYS", 0)
+
+
 def _bdates(n: int, start: str = "2024-01-02") -> pd.DatetimeIndex:
     return pd.date_range(start=start, periods=n, freq="B")
 
@@ -593,3 +602,97 @@ def test_costs_and_slippage_are_wired_through_config(monkeypatch):
     assert abs(init.shares - (expected_spend / 100.075)) < 1e-9
     # Flat prices + costs erode final equity below initial capital
     assert res.ending_equity < 10_000.0
+
+
+
+@pytest.mark.with_defer
+def test_exit_defer_timer_fires_after_n_business_days(monkeypatch):
+    # D-BT25: EXIT deferred 2 business days; no acute breakdown; fires on day 4.
+    monkeypatch.setattr(cfg, "EXIT_DEFER_DAYS", 2)
+    monkeypatch.setattr(cfg, "MA_LONG", 2)
+    dates = _bdates(6)
+    # Stable prices around ma200 -> no acute breakdown.
+    opens = pd.DataFrame({"A": [100.0] * 6}, index=dates)
+    closes = pd.DataFrame({"A": [100.0] * 6}, index=dates)
+    sig = pd.DataFrame({"A": ["HOLD", "EXIT", "EXIT", "EXIT", "EXIT", "EXIT"]}, index=dates)
+    res = simulator.run_simulation(
+        start_date=dates[0], end_date=dates[-1],
+        initial_capital=1000.0, holding_symbols=["A"],
+        open_df=opens, close_df=closes, decisions=sig,
+    )
+    sells = [f for f in res.fills if f.side == "SELL"]
+    assert len(sells) == 1
+    # EXIT emitted at close of dates[1]; enqueued at open of dates[2]; decremented
+    # on dates[3]; fires on dates[4] open.
+    assert sells[0].date == str(dates[4].date())
+    assert sells[0].reason == "EXIT_DEFERRED"
+    events = set(res.defer_history["event"])
+    assert {"enqueue", "decrement", "fire_expired"} <= events
+
+
+@pytest.mark.with_defer
+def test_exit_defer_acute_breakdown_bypasses_timer(monkeypatch):
+    # D-BT25: price << 200DMA fires SELL on the next open, same day the signal would.
+    monkeypatch.setattr(cfg, "EXIT_DEFER_DAYS", 2)
+    monkeypatch.setattr(cfg, "MA_LONG", 2)
+    dates = _bdates(5)
+    # Close on day 1 drops hard; ma200 on day 1 = mean(100, 80) = 90; day 2 open = 80.
+    # 80 < 90 * 0.95 = 85.5 -> acute.
+    opens = pd.DataFrame({"A": [100.0, 100.0, 80.0, 80.0, 80.0]}, index=dates)
+    closes = pd.DataFrame({"A": [100.0, 80.0, 80.0, 80.0, 80.0]}, index=dates)
+    sig = pd.DataFrame({"A": ["HOLD", "EXIT", "EXIT", "EXIT", "EXIT"]}, index=dates)
+    res = simulator.run_simulation(
+        start_date=dates[0], end_date=dates[-1],
+        initial_capital=1000.0, holding_symbols=["A"],
+        open_df=opens, close_df=closes, decisions=sig,
+    )
+    sells = [f for f in res.fills if f.side == "SELL"]
+    assert len(sells) == 1
+    assert sells[0].reason == "EXIT_ACUTE"
+    assert sells[0].date == str(dates[2].date())  # next open after signal, no delay
+    assert "fire_acute" in set(res.defer_history["event"])
+
+
+@pytest.mark.with_defer
+def test_exit_defer_cancelled_on_upgrade_within_window(monkeypatch):
+    # D-BT25: strategy flips EXIT -> REDUCE (re-entry) mid-defer -> cancel, no SELL.
+    monkeypatch.setattr(cfg, "EXIT_DEFER_DAYS", 2)
+    monkeypatch.setattr(cfg, "MA_LONG", 2)
+    dates = _bdates(6)
+    opens = pd.DataFrame({"A": [100.0] * 6}, index=dates)
+    closes = pd.DataFrame({"A": [100.0] * 6}, index=dates)
+    # EXIT emitted on day 1, matrix flips to REDUCE (re-entry) on day 2, then
+    # HOLD (upgrade) on day 3+. Simulator's deferral cancels on the REDUCE;
+    # no SELL should fire and the full position is retained.
+    sig = pd.DataFrame({"A": ["HOLD", "EXIT", "REDUCE", "HOLD", "HOLD", "HOLD"]}, index=dates)
+    res = simulator.run_simulation(
+        start_date=dates[0], end_date=dates[-1],
+        initial_capital=1000.0, holding_symbols=["A"],
+        open_df=opens, close_df=closes, decisions=sig,
+    )
+    # No SELL should ever fire; full position retained.
+    assert not any(f.side == "SELL" for f in res.fills)
+    assert abs(res.final_positions["A"] - 10.0) < 1e-9  # 1000 / 100 = 10 shares
+    events = list(res.defer_history["event"])
+    assert "enqueue" in events and "cancel_upgrade" in events
+    assert "fire_expired" not in events and "fire_acute" not in events
+
+
+@pytest.mark.with_defer
+def test_exit_defer_fill_date_matches_expiry_open(monkeypatch):
+    # D-BT25: DEFER_DAYS=1 -> fill dated one business day later than the no-defer case.
+    monkeypatch.setattr(cfg, "EXIT_DEFER_DAYS", 1)
+    monkeypatch.setattr(cfg, "MA_LONG", 2)
+    dates = _bdates(5)
+    opens = pd.DataFrame({"A": [100.0] * 5}, index=dates)
+    closes = pd.DataFrame({"A": [100.0] * 5}, index=dates)
+    sig = pd.DataFrame({"A": ["HOLD", "EXIT", "EXIT", "EXIT", "EXIT"]}, index=dates)
+    res = simulator.run_simulation(
+        start_date=dates[0], end_date=dates[-1],
+        initial_capital=1000.0, holding_symbols=["A"],
+        open_df=opens, close_df=closes, decisions=sig,
+    )
+    sells = [f for f in res.fills if f.side == "SELL"]
+    assert len(sells) == 1
+    # DEFER_DAYS=1: enqueue on dates[2] open, fires on dates[3] open.
+    assert sells[0].date == str(dates[3].date())

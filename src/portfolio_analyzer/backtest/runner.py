@@ -29,6 +29,21 @@ def _rename_ns_to_symbol(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.rename(columns=lambda t: t[:-3] if t.endswith(".NS") else t)
 
 
+def _summarize_defer(defer_history: pd.DataFrame) -> dict:
+    """Counters for the D-BT25 EXIT-defer lifecycle events."""
+    if defer_history is None or defer_history.empty:
+        return {"num_enqueued": 0, "num_fire_expired": 0, "num_fire_acute": 0,
+                "num_cancel_upgrade": 0, "num_cancel_floor": 0}
+    counts = defer_history["event"].value_counts()
+    return {
+        "num_enqueued": int(counts.get("enqueue", 0)),
+        "num_fire_expired": int(counts.get("fire_expired", 0)),
+        "num_fire_acute": int(counts.get("fire_acute", 0)),
+        "num_cancel_upgrade": int(counts.get("cancel_upgrade", 0)),
+        "num_cancel_floor": int(counts.get("cancel_floor", 0)),
+    }
+
+
 def run_backtest(
     start_date: dt.date,
     end_date: dt.date,
@@ -136,6 +151,7 @@ def run_backtest(
             "SIDEWAYS": int((market_daily.trend == "SIDEWAYS").sum()),
             "DOWNTREND": int((market_daily.trend == "DOWNTREND").sum()),
         },
+        "exit_deferrals": _summarize_defer(result.defer_history),
     }
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +176,8 @@ def _write_artifacts(out_path: Path, result: simulator.SimResult, bench: pd.Seri
         result.rearm_history.to_csv(stem.parent / f"{stem.name}_rearms.csv", index=False)
     if result.refill_history is not None and not result.refill_history.empty:
         result.refill_history.to_csv(stem.parent / f"{stem.name}_refills.csv", index=False)
+    if result.defer_history is not None and not result.defer_history.empty:
+        result.defer_history.to_csv(stem.parent / f"{stem.name}_defers.csv", index=False)
     if result.fills:
         pd.DataFrame([f.__dict__ for f in result.fills]).to_csv(
             stem.parent / f"{stem.name}_fills.csv", index=False,

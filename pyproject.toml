@@ -39,6 +39,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "with_costs: opt-out of the simulator-test zero-cost autouse fixture",
+    "with_defer: opt-out of the simulator-test zero-defer autouse fixture",
 ]
 
 [tool.ruff]

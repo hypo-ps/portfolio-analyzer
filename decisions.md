@@ -518,3 +518,52 @@ rally couldn't be re-joined. Two targeted changes:
 - **Alignment:** Matches `compute_refill_eligibility`'s own drawdown check,
   so REENTRY and REFILL now share the same structural-integrity gate.
 
+
+### D-BT25. EXIT deferral: 2-day timer with acute-breakdown bypass
+- **Problem observed:** v9 per-year decomposition showed whipsaws in V-shape
+  recovery windows (notably 2025: -8.45 pp alpha). Names that briefly dipped
+  below 200DMA or -15% drawdown were EXITed at the next open, then re-entered
+  via the D-BT19 re-entry gate a few sessions later, paying slippage + costs
+  both ways and missing the bounce. Sub-period analysis showed most of the
+  exits fired within 2-3 sessions of a short-lived breakdown.
+- **Decision:** when the decision matrix emits EXIT, the simulator enqueues a
+  pending exit with `cfg.EXIT_DEFER_DAYS = 2` business days rather than
+  executing immediately. Each subsequent day, at the t+1 open:
+  - If `price < ma200 * cfg.EXIT_DEFER_DMA_THRESHOLD` (default 0.95 -> >5%
+    below 200DMA), the exit is treated as an acute breakdown and fires
+    immediately with reason `EXIT_ACUTE`.
+  - Otherwise the timer decrements; on expiry the exit fires with reason
+    `EXIT_DEFERRED`.
+  - If the matrix emits any non-EXIT signal during the window (typically
+    EXIT -> REDUCE via the re-entry gate), the deferral is cancelled and the
+    position stays in its pre-exit state (no reduce_half is fired on the
+    cancellation day).
+- **Floor interaction:** on timer expiry or acute breakdown, `_would_breach_
+  floor` is checked the same way as the immediate-EXIT path; floor-blocked
+  deferrals are logged with `cancel_floor` and the pending entry is dropped.
+- **Diagnostics:** `SimResult.defer_history` records every enqueue, decrement,
+  fire_acute, fire_expired, cancel_upgrade, cancel_floor event. The report
+  surfaces aggregate counters under `exit_deferrals`. A `<stem>_defers.csv`
+  companion artifact is written.
+- **Backtest results (2021-04 to 2026-04 vs v9 baseline, NIFTY 500 refill):**
+  CAGR 15.52% -> 17.55% (+2.03 pp); alpha 1.46 pp -> 3.55 pp (2.4x); Sharpe
+  1.47 -> 1.55; fills 2385 -> 2037 (-15%); executed exits 4102 -> 3453 (-16%).
+  Per-year: 2023 alpha +4.89 -> +11.61 (+6.72 pp), 2024 +8.78 -> +11.47
+  (+2.69), 2025 -8.45 -> -5.81 (+2.64). MaxDD worsened from -11.4% to -17.7%,
+  an accepted tradeoff for sitting through short-lived breakdowns. Sideways
+  2022 regressed (+2.69 -> -0.73) since deferred names rode small pullbacks
+  down rather than whipsawing back.
+- **Not yet applied to the live analyzer.** The live pipeline is stateless
+  across days apart from the previous JSON (D-BT17); implementing parity
+  requires persisting `pending_exits` in the daily report and loading it on
+  the next run. Deferred as a follow-up because (a) the live analyzer calls
+  `strategy.decide` once per day and does not execute trades, and (b) the
+  primary value of this rule is for backtested capital-deployment analysis.
+  When parity is added, the live path should read yesterday's pending map,
+  evaluate acute / timer today, and emit the same EXIT_ACUTE / EXIT_DEFERRED
+  decisions to the caller.
+- **Tests:** `tests/test_backtest_simulator.py` adds 4 tests under the
+  `with_defer` pytest mark: timer-expiry fill date, acute bypass, upgrade
+  cancellation, and DEFER_DAYS=1 boundary. A matching `_no_defer` autouse
+  fixture mirrors `_zero_costs`: legacy tests keep immediate-EXIT semantics.
+

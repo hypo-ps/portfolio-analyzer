@@ -22,6 +22,7 @@ class SimResult:
     blocked_history: pd.DataFrame      # (date, symbol, decision, reason) for floor-blocked trades
     rearm_history: pd.DataFrame        # (date, symbol) for ranked re-arm upgrades (D-BT21)
     refill_history: pd.DataFrame       # (date, symbol, rupees) for opportunistic refills (D-BT22)
+    defer_history: pd.DataFrame        # (date, symbol, event) EXIT-defer lifecycle (D-BT25)
     final_positions: dict[str, float]  # symbol -> shares
     starting_capital: float
     ending_equity: float
@@ -263,6 +264,7 @@ def run_simulation(
     blocked_log: list[tuple[pd.Timestamp, str, str, str]] = []
     rearm_log: list[tuple[pd.Timestamp, str]] = []
     refill_log: list[tuple[pd.Timestamp, str, float]] = []
+    defer_log: list[tuple[pd.Timestamp, str, str]] = []
     floor = cfg.EXPOSURE_FLOOR
     reentry_fraction = cfg.REENTRY_ALLOCATION_FRACTION
     rearm_max_weight = cfg.REARM_MAX_WEIGHT_PER_STOCK
@@ -270,11 +272,17 @@ def run_simulation(
     refill_fraction = cfg.REFILL_ALLOCATION_FRACTION
     refill_external_cap = cfg.REFILL_EXTERNAL_EXPOSURE_CAP
     refill_top_k = cfg.REFILL_TOP_K
+    defer_days = int(cfg.EXIT_DEFER_DAYS)
+    defer_dma_threshold = float(cfg.EXIT_DEFER_DMA_THRESHOLD)
     fee_kw = {"slippage_bps": cfg.SLIPPAGE_BPS, "cost_bps": cfg.TRANSACTION_COST_BPS}
     core_set = set(holding_symbols)
     if candidate_symbols is None:
         candidate_symbols = list(holding_symbols)
     decision_iter = candidate_symbols
+    # D-BT25: ma200 frame for acute-breakdown test; computed on close_df so it
+    # matches phase0_strategy's own ma200 (decoupled from the decisions matrix).
+    ma200_df = close_df.rolling(cfg.MA_LONG).mean() if defer_days > 0 else None
+    pending_exits: dict[str, int] = {}
 
     for i in range(1, len(dates)):
         t_prev = dates[i - 1]
@@ -285,8 +293,55 @@ def run_simulation(
                  and t_prev in market_trend.index else None)
         floor_active = trend is not None and trend != "DOWNTREND"  # D-BT20: UPTREND + SIDEWAYS
 
+        # D-BT25: resolve deferred EXITs BEFORE processing today's decisions.
+        # Acute breakdown (price < ma200 * threshold) fires immediately; otherwise
+        # the timer decrements. A non-EXIT matrix signal cancels the deferral.
+        cancelled_today: set[str] = set()
+        if pending_exits and ma200_df is not None:
+            ma200_row = ma200_df.loc[t_prev] if t_prev in ma200_df.index else None
+            to_drop: list[str] = []
+            for sym, remaining in list(pending_exits.items()):
+                matrix_dec = dec_row.get(sym) if dec_row is not None else None
+                if isinstance(matrix_dec, str) and matrix_dec != "EXIT":
+                    defer_log.append((t_prev, sym, "cancel_upgrade"))
+                    to_drop.append(sym)
+                    cancelled_today.add(sym)
+                    continue
+                px = float(open_row.get(sym, float("nan")))
+                if math.isnan(px) or px <= 0:
+                    continue  # keep pending, try again tomorrow
+                ma200 = float(ma200_row.get(sym, float("nan"))) if ma200_row is not None else float("nan")
+                acute = (not math.isnan(ma200) and ma200 > 0
+                         and px < ma200 * defer_dma_threshold)
+                remaining -= 1
+                if not acute and remaining > 0:
+                    pending_exits[sym] = remaining
+                    defer_log.append((t_prev, sym, "decrement"))
+                    continue
+                # Fire the SELL now (timer expired or acute breakdown).
+                if floor_active and _would_breach_floor(
+                    state.portfolio, open_row, sym, "EXIT", floor
+                ):
+                    blocked_log.append((t_prev, sym, "EXIT", "exposure_floor"))
+                    defer_log.append((t_prev, sym, "cancel_floor"))
+                    to_drop.append(sym)
+                    continue
+                reason = "EXIT_ACUTE" if acute else "EXIT_DEFERRED"
+                fill = broker.exit_position(state.portfolio, str(t_now.date()), sym, px,
+                                            reason=reason, **fee_kw)
+                if fill is not None:
+                    state.fills.append(fill)
+                state.last_decision[sym] = "EXIT"
+                decisions_log.append((t_prev, sym, "EXIT"))
+                defer_log.append((t_prev, sym, "fire_acute" if acute else "fire_expired"))
+                to_drop.append(sym)
+            for sym in to_drop:
+                pending_exits.pop(sym, None)
+
         if dec_row is not None:
             for sym in decision_iter:
+                if sym in pending_exits or sym in cancelled_today:
+                    continue  # deferred EXIT in flight, or just cancelled today
                 new_dec = dec_row.get(sym)
                 if not isinstance(new_dec, str):
                     continue
@@ -314,8 +369,21 @@ def run_simulation(
                     fill = broker.reduce_half(state.portfolio, str(t_now.date()), sym, px,
                                               reason="REDUCE", **fee_kw)
                 elif new_dec == "EXIT":
+                    exit_reason = "EXIT"
+                    if defer_days > 0 and ma200_df is not None:
+                        ma200 = float("nan")
+                        if t_prev in ma200_df.index and sym in ma200_df.columns:
+                            ma200 = float(ma200_df.at[t_prev, sym])
+                        acute_now = (not math.isnan(ma200) and ma200 > 0
+                                     and px < ma200 * defer_dma_threshold)
+                        if not acute_now:
+                            pending_exits[sym] = defer_days
+                            defer_log.append((t_prev, sym, "enqueue"))
+                            continue  # no state advance until timer resolves
+                        exit_reason = "EXIT_ACUTE"
+                        defer_log.append((t_prev, sym, "fire_acute"))
                     fill = broker.exit_position(state.portfolio, str(t_now.date()), sym, px,
-                                                reason="EXIT", **fee_kw)
+                                                reason=exit_reason, **fee_kw)
                 elif new_dec == "HOLD" and prev_dec == "REDUCE":
                     pos = state.portfolio.positions.get(sym)
                     if pos is not None and pos.state == STATE_REDUCED:
@@ -391,6 +459,8 @@ def run_simulation(
         else pd.DataFrame(columns=["date", "symbol"])
     refills = pd.DataFrame(refill_log, columns=["date", "symbol", "rupees"]) if refill_log \
         else pd.DataFrame(columns=["date", "symbol", "rupees"])
+    defers = pd.DataFrame(defer_log, columns=["date", "symbol", "event"]) if defer_log \
+        else pd.DataFrame(columns=["date", "symbol", "event"])
 
     return SimResult(
         equity_curve=eq_series,
@@ -400,6 +470,7 @@ def run_simulation(
         blocked_history=blocked,
         rearm_history=rearms,
         refill_history=refills,
+        defer_history=defers,
         final_positions={s: p.shares for s, p in state.portfolio.positions.items()},
         starting_capital=float(initial_capital),
         ending_equity=float(eq_series.iloc[-1]),
