@@ -61,7 +61,13 @@ VCP detection and fundamentals remain out of scope for this slice.
       `scanner ca-ingest` / `ca-rebuild-adjustments` CLI). Dividends stored
       as metadata only. Live verified: 311 CAs in a 90-day window, incl. 13
       BONUS and 8 SPLIT events correctly parsed.
-- [ ] Historical backfill: single run to populate last ~10y of bhavcopies.
+- [x] Historical backfill: populated 2024-07-08 → 2026-04-23, ~1.03M bars
+      across 2,939 ISINs, 4,284 corporate actions, 28,012 price-adjusted bars.
+- [x] Fundamentals ingestion layer — Screener.in scraper covering sector /
+      industry / market-cap / P/E / ROE / ROCE / 52w high-low plus 10y+ of
+      annual P&L, balance-sheet highlights and ratios.
+      Tables: `fundamentals_meta`, `financials_annual`, `ratios_annual`,
+      `fundamentals_ingestion_log`. CLI: `scanner fundamentals-ingest`.
 - [ ] BSE bhavcopy ingestion (same UDiFF format on BSE's server).
 - [ ] Cross-exchange ISIN mapping + dedupe for dual-listed names.
 - [ ] SME series (`SctySrs=SM`) as a separate universe.
@@ -69,5 +75,6 @@ VCP detection and fundamentals remain out of scope for this slice.
 - [ ] Merger / demerger / consolidation handling.
 - [ ] Dividend-adjusted total-return series (separate view).
 - [ ] BSE corporate actions (same schema, different source).
-- [ ] Fundamentals ingestion layer (source TBD).
+- [ ] Fundamentals fallback sources (Tickertape, Yahoo) for names not on
+      Screener; promoter-holding / shareholding-pattern block.
 - [ ] VCP feature engineering + scanner engine.

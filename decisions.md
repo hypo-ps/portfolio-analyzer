@@ -798,3 +798,55 @@ rally couldn't be re-joined. Two targeted changes:
   TERP for rights, merger/demerger handling, and BSE corporate actions
   (will layer in alongside BSE bhavcopy ingestion).
 
+
+## 2026-04-23 — Phase 1 fundamentals ingestion (Screener.in)
+
+### D-S12. Fundamentals source — Screener.in HTML
+- **Decision:** Scrape the public `screener.in/company/{SYMBOL}/{variant}/`
+  pages, preferring `consolidated` and falling back to `standalone` on 404.
+- **Rationale:** Screener publishes 10y+ annual P&L, balance-sheet highlights
+  and ratios in a single page, plus a `top-ratios` block with live
+  market-cap / PE / ROE / ROCE / 52w band. `robots.txt` only disallows
+  `?q=`/`?page=` query patterns, so company pages are fair game. Tickertape
+  and Yahoo are slated as fallbacks for symbols Screener doesn't cover.
+- **Scraping etiquette:** desktop `REFRESH_USER_AGENT`, 2s throttle
+  (`SCREENER_REQUEST_DELAY_SEC`), exponential backoff on 429 / 5xx, max
+  `SCREENER_MAX_RETRIES` per variant.
+
+### D-S13. Fundamentals schema — ISIN-keyed, source-tagged
+- **Decision:** Four new tables, all keyed on `isin` + `source` (+ `fiscal_year`
+  + `report_type` where annual):
+  - `fundamentals_meta(isin, source, sector, industry, market_cap_cr, ...)`
+  - `financials_annual(isin, fiscal_year, source, report_type, sales_cr, ...)`
+  - `ratios_annual(isin, fiscal_year, source, report_type, roce_pct, ...)`
+  - `fundamentals_ingestion_log(isin, source, status, detail, report_type, fetched_at)`
+- **Units:** money columns in **rupees crore**; percentages stored as
+  decimals (28% → 0.28) — the parser normalizes at read time via
+  `_clean_number` (handles Indian commas, ₹, `Cr.`/`L`/`K` suffixes,
+  parentheses for negatives, `+` expand markers, em-dash blanks).
+- **Report variant:** the `report_type` column (`consolidated` | `standalone`)
+  is part of the PK so a company can carry both variants without collisions.
+
+### D-S14. Orchestrator — freshness-cached, forgiving ingest
+- **Decision:** `scanner/fundamentals/ingest.py` iterates `stock_master`,
+  calls the Screener fetcher + parser per symbol, upserts into the three
+  tables, and writes one row per run into `fundamentals_ingestion_log` with
+  status `ok` / `not_found` / `error`.
+- **Freshness:** re-runs skip any ISIN whose most recent `ok` fetch is newer
+  than `SCREENER_REFRESH_AFTER_DAYS` (default 7). `--force` overrides.
+- **Failure isolation:** network, 404 and parser exceptions are captured per
+  symbol; the loop commits every 25 symbols so a long run can be interrupted
+  without losing progress.
+
+### D-S15. Scanner CLI grows a fundamentals command
+- **Decision:** `scanner fundamentals-ingest [--symbol S]... [--limit N]
+  [--refresh-days D] [--force] [--db PATH]`. JSON summary mirrors the
+  other scanner commands (`processed`, `ok`, `not_found`, `error`,
+  `skipped`). `scanner status` now includes a `fundamentals` block
+  (`companies_covered`, `annual_rows`, `ratios_rows`, `by_status`,
+  `last_fetch`).
+- **Out of scope for this slice:** Tickertape / Yahoo fallbacks,
+  promoter-holding / shareholding-pattern block, quarterly P&L,
+  cash-flow statements, peer comparisons.
+
+

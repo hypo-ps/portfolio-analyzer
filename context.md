@@ -262,6 +262,9 @@ same project rather than as a separate codebase (D-S1).
   - `bhavcopy.py` — NSE UDiFF fetch + CSV parse (ISIN-keyed rows)
   - `db.py` — SQLite schema, connection, upsert helpers
   - `ingest.py` — orchestrator: idempotent per-date ingestion, range iteration
+  - `corp_actions.py`, `ca_ingest.py` — corporate-action fetcher + orchestrator
+  - `fundamentals/screener.py` — Screener.in fetcher + HTML parser
+  - `fundamentals/ingest.py` — fundamentals orchestrator across `stock_master`
 
 ### Data source
 
@@ -291,6 +294,8 @@ portfolio-analyzer scanner ingest-range            --start YYYY-MM-DD --end YYYY
 portfolio-analyzer scanner ca-ingest               --start YYYY-MM-DD --end YYYY-MM-DD
                                                    [--no-rebuild] [--db PATH]
 portfolio-analyzer scanner ca-rebuild-adjustments  [--db PATH]
+portfolio-analyzer scanner fundamentals-ingest     [--symbol S]... [--limit N]
+                                                   [--refresh-days D] [--force] [--db PATH]
 portfolio-analyzer scanner status                  [--db PATH]
 ```
 
@@ -312,11 +317,33 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
 - Only `BONUS` and `SPLIT` carry a non-1.0 factor. Dividends, rights,
   buybacks, mergers, etc. are stored as metadata only for this slice.
 
+### Fundamentals (D-S12/D-S13/D-S14/D-S15)
+
+- `scanner/fundamentals/screener.py` — fetches
+  `screener.in/company/{SYMBOL}/{variant}/` with a 2s throttle and
+  exponential backoff, falling back from `consolidated` to `standalone`;
+  parses the `top-ratios` block, `#profit-loss`, `#balance-sheet` and
+  `#ratios` tables into a typed `ScreenerCompany`.
+- `scanner/fundamentals/ingest.py` — iterates `stock_master`, skips ISINs
+  whose last successful fetch is newer than `SCREENER_REFRESH_AFTER_DAYS`
+  (7 days by default), upserts per-symbol, and logs status to
+  `fundamentals_ingestion_log`.
+- Extra tables in `data/scanner.db` (all ISIN-keyed, `source='screener'`):
+  - `fundamentals_meta` — sector, industry, market-cap, PE, ROE, ROCE,
+    52w band, promoter holding.
+  - `financials_annual(isin, fiscal_year, source, report_type, ...)` —
+    sales, expenses, OPM%, net profit, EPS, borrowings, total assets.
+  - `ratios_annual(isin, fiscal_year, source, report_type, ...)` — debtor
+    days, inventory days, CCC, working-capital days, ROCE%.
+  - `fundamentals_ingestion_log(isin, source, status, detail, report_type,
+    fetched_at)` — per-symbol outcome, drives the freshness skip.
+- Money columns store rupees crore; percentages store decimals (28% → 0.28).
+
 ### Non-goals (Phase 1)
 
 - BSE ingestion, dual-listed dedupe, SME series
 - Rights / merger / demerger price adjustments
 - Dividend-adjusted total-return series
-- Fundamentals ingestion
+- Tickertape / Yahoo fundamentals fallbacks, quarterly P&L, cash flow
 - VCP feature engineering / scanner engine
 - Any change to the Phase 0 live analyzer or backtest contracts
