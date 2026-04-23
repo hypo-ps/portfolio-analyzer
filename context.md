@@ -248,3 +248,56 @@ Regimes: `>= 0.65` strong · `0.40 – 0.65` mixed · `< 0.40` weak.
   backtest parquet cache which is local-only and gitignored)
 - No watchlist screening beyond current holdings
 - No intraday logic — daily close only
+
+## Phase 1 — Scanner data pipeline
+
+Phase 1 covers the **full NSE/BSE equity universe** with clean OHLCV (and
+later, fundamentals). It feeds layers B (VCP watchlist) and D (fundamentals)
+in the target end-state described above, and lives alongside Phase 0 in the
+same project rather than as a separate codebase (D-S1).
+
+### Subpackage
+
+- `src/portfolio_analyzer/scanner/`
+  - `bhavcopy.py` — NSE UDiFF fetch + CSV parse (ISIN-keyed rows)
+  - `db.py` — SQLite schema, connection, upsert helpers
+  - `ingest.py` — orchestrator: idempotent per-date ingestion, range iteration
+
+### Data source
+
+- **NSE UDiFF Common Bhavcopy Final** —
+  `https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{YYYYMMDD}_F_0000.csv.zip`
+- Equity filter: `FinInstrmTp == 'STK' AND SctySrs IN {EQ, BE}`
+  (~2.6k rows/day; SME and derivatives deferred).
+- Non-trading days return HTTP 404 and are surfaced as `no_data`, not errors.
+
+### Storage (`data/scanner.db`, SQLite, WAL, FK on)
+
+- `stock_master(isin PK, symbol, name, series, exchange, first_seen_date, last_seen_date)`
+- `market_data(isin, trade_date, open, high, low, close, prev_close, volume, turnover, trades)`
+  with PK `(isin, trade_date)` and FK `isin → stock_master`.
+- `ingestion_log(trade_date PK, source, rows_ingested, ingested_at)` —
+  drives the idempotency check.
+
+ISIN is the primary key (D-S4) so renames, corporate actions, and future BSE
+ingestion can share the same rows without a symbol remap layer.
+
+### CLI
+
+```
+portfolio-analyzer scanner ingest        --date YYYY-MM-DD [--force] [--db PATH]
+portfolio-analyzer scanner ingest-range  --start YYYY-MM-DD --end YYYY-MM-DD
+                                         [--force] [--db PATH]
+portfolio-analyzer scanner status        [--db PATH]
+```
+
+All commands emit JSON on stdout. `ingest` exits 1 on per-date `error`
+(network / parse failure); `no_data` and `skipped` are non-error outcomes.
+
+### Non-goals (Phase 1)
+
+- BSE ingestion, dual-listed dedupe, SME series
+- Corporate actions normalization
+- Fundamentals ingestion
+- VCP feature engineering / scanner engine
+- Any change to the Phase 0 live analyzer or backtest contracts

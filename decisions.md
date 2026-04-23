@@ -677,3 +677,67 @@ rally couldn't be re-joined. Two targeted changes:
   adds a pending-exits round-trip case and is updated for the new
   `(states, pending)` return shape. 158 tests pass (was 147).
 
+
+## 2026-04-23 — Phase 1 scanner bootstrap (NSE universe + OHLCV ingestion)
+
+### D-S1. Phase 1 lives inside `portfolio-analyzer`
+- **Decision:** Phase 1 (VCP scanner data pipeline) ships as a new subpackage
+  `src/portfolio_analyzer/scanner/` rather than a separate project.
+- **Rationale:** Reuses Phase 0 config, logging, CLI group, test scaffolding.
+  Phase 0 contract is unaffected; no cross-imports from Phase 0 into scanner
+  code (isolation works the other direction only).
+
+### D-S2. Storage engine — SQLite
+- **Decision:** Use SQLite (single file at `data/scanner.db`) for the stock
+  universe, OHLCV history, and ingestion log. WAL mode, FK enforcement on.
+- **Alternatives considered:** parquet-per-ticker (like `data/backtest_cache`);
+  duckdb; Postgres. Rejected because (a) ~2.6k stocks × 10y daily ≈ ~6.5M rows
+  fits comfortably in SQLite, (b) we need upserts on `(isin, trade_date)` which
+  parquet does not do natively, (c) zero external service dependency.
+- **Gitignored:** `data/scanner.db` and its `-wal` / `-shm` / `-journal` siblings.
+
+### D-S3. NSE bhavcopy source — UDiFF Common Bhavcopy Final
+- **Decision:** Fetch from
+  `https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{YYYYMMDD}_F_0000.csv.zip`.
+- **Context:** The legacy `cm{DD}{MMM}{YYYY}bhav.csv.zip` format was
+  **discontinued on 2024-07-08** per NSE circular 62424. UDiFF is now the
+  authoritative daily bhavcopy across NSE, BSE, and all SEBI-regulated MIIs.
+- **Auth:** No cookie handshake required on the `nsearchives.nseindia.com` host
+  — a standard desktop UA (reused `REFRESH_USER_AGENT`) is sufficient.
+- **Non-trading days:** return HTTP 404. Treated as `no_data` outcome, not
+  `error`, so date-range ingestion does not halt on weekends/holidays.
+
+### D-S4. Primary key — ISIN
+- **Decision:** `stock_master.isin` is the PK; `market_data` keys on
+  `(isin, trade_date)`. Symbol is a secondary lookup via an index.
+- **Rationale:** Symbols rotate (rename, dual-listing, corporate actions);
+  ISIN is stable per security and shared across NSE/BSE, which lets us join
+  BSE bhavcopies in later phases without building a remap table.
+- **Rows without ISIN are dropped** at parse time (observed <1% of UDiFF rows).
+
+### D-S5. Equity filter — `FinInstrmTp=STK AND SctySrs IN {EQ, BE}`
+- **Decision:** Parser keeps only instrument type `STK` with series `EQ` or
+  `BE`. Everything else (derivatives, SME, government bonds, treasury bills,
+  closed-end funds, rights) is discarded.
+- **Sample counts on 2026-04-22 UDiFF:** 2,501 EQ + 153 BE = **2,654 rows**
+  — matches the Phase 1 "full NSE equity universe" scope.
+- **Revisit:** SME (`SctySrs=SM`, ~370 rows/day) and derivatives will be
+  added as separate series sets in later phases.
+
+### D-S6. Idempotent ingestion + ingestion log
+- **Decision:** `ingest_date(trade_date)` is idempotent — it checks
+  `ingestion_log` for `trade_date` first and skips unless `--force`. Writes
+  are wrapped in a single transaction per date. Re-ingestion updates the
+  existing market_data row rather than inserting a duplicate.
+- **Range semantics:** `ingest_range(start, end)` iterates weekday-by-weekday
+  (NSE is closed Sat/Sun); holidays are surfaced as per-date `no_data` in the
+  summary rather than raised as errors.
+
+### D-S7. Scanner CLI lives under the existing `portfolio-analyzer` command
+- **Decision:** New click subgroup `scanner` with three commands:
+  - `scanner ingest --date YYYY-MM-DD [--force] [--db PATH]`
+  - `scanner ingest-range --start --end [--force] [--db PATH]`
+  - `scanner status [--db PATH]`
+- **Output:** JSON on stdout (matches Phase 0 CLI convention); exit code 1
+  only on per-date `error` status (network / parse failure).
+

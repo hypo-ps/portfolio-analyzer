@@ -41,3 +41,24 @@
 - Persistent DB or OHLC cache
 - Watchlist screening beyond current holdings
 - Intraday / tick-level logic
+
+## Phase 1 — Scanner data pipeline
+
+Design: NSE/BSE VCP scanner covering full equity universe with clean OHLCV +
+fundamentals. Ingestion, universe, and historical OHLCV storage come first;
+VCP detection and fundamentals remain out of scope for this slice.
+
+- [x] NSE UDiFF bhavcopy fetcher + parser (`scanner/bhavcopy.py`).
+- [x] SQLite storage with `stock_master` (ISIN PK), `market_data`, `ingestion_log`.
+- [x] Idempotent `ingest_date` / `ingest_range` orchestrator.
+- [x] CLI: `scanner ingest`, `scanner ingest-range`, `scanner status`.
+- [x] Tests: parser fixtures, db upsert idempotency, orchestrator with mocked
+      network, CLI smoke (26 new tests, 184 total).
+- [x] Live end-to-end verified: 2,654 NSE equity rows ingested for 2026-04-22.
+- [ ] Historical backfill: single run to populate last ~10y of bhavcopies.
+- [ ] BSE bhavcopy ingestion (same UDiFF format on BSE's server).
+- [ ] Cross-exchange ISIN mapping + dedupe for dual-listed names.
+- [ ] SME series (`SctySrs=SM`) as a separate universe.
+- [ ] Corporate actions normalization (splits / bonuses / dividends).
+- [ ] Fundamentals ingestion layer (source TBD).
+- [ ] VCP feature engineering + scanner engine.
