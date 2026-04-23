@@ -332,13 +332,16 @@ def scanner_ingest_range(
 @_db_option
 def scanner_status(db_path: Path | None) -> None:
     """Print a summary of what's in the scanner DB."""
-    from portfolio_analyzer.scanner.db import default_db_path, ingestion_summary, open_db
+    from portfolio_analyzer.scanner.db import (
+        default_db_path, init_schema, ingestion_summary, open_db,
+    )
 
     path = db_path or default_db_path()
     if not path.exists():
         sys.stdout.write(json.dumps({"db": str(path), "exists": False}, indent=2) + "\n")
         return
     with open_db(path) as conn:
+        init_schema(conn)  # idempotent migration for DBs created pre-CA
         summary = ingestion_summary(conn)
     summary["db"] = str(path)
     summary["exists"] = True
