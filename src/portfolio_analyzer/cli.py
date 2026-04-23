@@ -345,5 +345,48 @@ def scanner_status(db_path: Path | None) -> None:
     sys.stdout.write(json.dumps(summary, indent=2) + "\n")
 
 
+@scanner.command("ca-ingest")
+@click.option("--start", "start_str", type=str, required=True,
+              help="Start ex-date (YYYY-MM-DD), inclusive.")
+@click.option("--end", "end_str", type=str, required=True,
+              help="End ex-date (YYYY-MM-DD), inclusive.")
+@click.option("--no-rebuild", is_flag=True, default=False,
+              help="Skip cumulative_adjustments rebuild after upsert.")
+@_db_option
+def scanner_ca_ingest(
+    start_str: str, end_str: str, no_rebuild: bool, db_path: Path | None,
+) -> None:
+    """Ingest NSE corporate actions (splits, bonuses, dividends, ...) for a date window."""
+    from portfolio_analyzer.scanner.ca_ingest import ingest_ca_range
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    start = dt.date.fromisoformat(start_str)
+    end = dt.date.fromisoformat(end_str)
+    result = ingest_ca_range(start, end, db_path=db_path, rebuild=not no_rebuild)
+    payload = {
+        "start": result.start.isoformat(),
+        "end": result.end.isoformat(),
+        "status": result.status,
+        "fetched": result.fetched,
+        "stored": result.stored,
+        "adjusted_bars": result.adjusted_bars,
+        "detail": result.detail,
+    }
+    sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+    if result.status == "error":
+        sys.exit(1)
+
+
+@scanner.command("ca-rebuild-adjustments")
+@_db_option
+def scanner_ca_rebuild(db_path: Path | None) -> None:
+    """Recompute the cumulative_adjustments table from corporate_actions + market_data."""
+    from portfolio_analyzer.scanner.ca_ingest import rebuild_adjustments
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    n = rebuild_adjustments(db_path=db_path)
+    sys.stdout.write(json.dumps({"adjusted_bars": n}, indent=2) + "\n")
+
+
 if __name__ == "__main__":
     main()
