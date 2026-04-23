@@ -55,10 +55,19 @@ VCP detection and fundamentals remain out of scope for this slice.
 - [x] Tests: parser fixtures, db upsert idempotency, orchestrator with mocked
       network, CLI smoke (26 new tests, 184 total).
 - [x] Live end-to-end verified: 2,654 NSE equity rows ingested for 2026-04-22.
+- [x] Corporate-actions normalization for splits + bonuses
+      (`scanner/corp_actions.py`, `scanner/ca_ingest.py`, `corporate_actions`
+      table, `cumulative_adjustments`, `adjusted_market_data` view,
+      `scanner ca-ingest` / `ca-rebuild-adjustments` CLI). Dividends stored
+      as metadata only. Live verified: 311 CAs in a 90-day window, incl. 13
+      BONUS and 8 SPLIT events correctly parsed.
 - [ ] Historical backfill: single run to populate last ~10y of bhavcopies.
 - [ ] BSE bhavcopy ingestion (same UDiFF format on BSE's server).
 - [ ] Cross-exchange ISIN mapping + dedupe for dual-listed names.
 - [ ] SME series (`SctySrs=SM`) as a separate universe.
-- [ ] Corporate actions normalization (splits / bonuses / dividends).
+- [ ] Rights-issue TERP adjustment (currently stored but not adjusted).
+- [ ] Merger / demerger / consolidation handling.
+- [ ] Dividend-adjusted total-return series (separate view).
+- [ ] BSE corporate actions (same schema, different source).
 - [ ] Fundamentals ingestion layer (source TBD).
 - [ ] VCP feature engineering + scanner engine.

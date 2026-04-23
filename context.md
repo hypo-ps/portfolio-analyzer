@@ -285,19 +285,38 @@ ingestion can share the same rows without a symbol remap layer.
 ### CLI
 
 ```
-portfolio-analyzer scanner ingest        --date YYYY-MM-DD [--force] [--db PATH]
-portfolio-analyzer scanner ingest-range  --start YYYY-MM-DD --end YYYY-MM-DD
-                                         [--force] [--db PATH]
-portfolio-analyzer scanner status        [--db PATH]
+portfolio-analyzer scanner ingest                  --date YYYY-MM-DD [--force] [--db PATH]
+portfolio-analyzer scanner ingest-range            --start YYYY-MM-DD --end YYYY-MM-DD
+                                                   [--force] [--db PATH]
+portfolio-analyzer scanner ca-ingest               --start YYYY-MM-DD --end YYYY-MM-DD
+                                                   [--no-rebuild] [--db PATH]
+portfolio-analyzer scanner ca-rebuild-adjustments  [--db PATH]
+portfolio-analyzer scanner status                  [--db PATH]
 ```
 
-All commands emit JSON on stdout. `ingest` exits 1 on per-date `error`
+All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
 (network / parse failure); `no_data` and `skipped` are non-error outcomes.
+
+### Corporate actions (D-S8/D-S9/D-S10/D-S11)
+
+- `scanner/corp_actions.py` — NSE JSON API fetcher + subject classifier.
+  Emits one `CorpAction` per event, with compound subjects
+  (e.g. `Bonus 4:1/Face Value Split ...`) expanded into two rows.
+- Extra tables in `data/scanner.db`:
+  - `corporate_actions(isin, ex_date, action_type, ratio_num, ratio_den,
+    price_factor, raw_subject, symbol, name, source, ingested_at)` with PK
+    `(isin, ex_date, action_type, raw_subject)`.
+  - `cumulative_adjustments(isin, trade_date, factor)` — materialized, only
+    rows where `factor != 1.0`.
+  - `adjusted_market_data` view — raw OHLCV × `COALESCE(factor, 1.0)`.
+- Only `BONUS` and `SPLIT` carry a non-1.0 factor. Dividends, rights,
+  buybacks, mergers, etc. are stored as metadata only for this slice.
 
 ### Non-goals (Phase 1)
 
 - BSE ingestion, dual-listed dedupe, SME series
-- Corporate actions normalization
+- Rights / merger / demerger price adjustments
+- Dividend-adjusted total-return series
 - Fundamentals ingestion
 - VCP feature engineering / scanner engine
 - Any change to the Phase 0 live analyzer or backtest contracts

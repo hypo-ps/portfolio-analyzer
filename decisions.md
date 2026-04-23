@@ -741,3 +741,60 @@ rally couldn't be re-joined. Two targeted changes:
 - **Output:** JSON on stdout (matches Phase 0 CLI convention); exit code 1
   only on per-date `error` status (network / parse failure).
 
+
+## 2026-04-23 — Phase 1 corporate-actions normalization
+
+### D-S8. Corporate-actions source — NSE JSON API
+- **Decision:** Fetch from
+  `https://www.nseindia.com/api/corporates-corporateActions?index=equities&from_date=DD-MM-YYYY&to_date=DD-MM-YYYY`.
+- **Rationale:** Single call covers multi-year windows (10y ≈ 22.5k records,
+  ~7 MB JSON). Returns **ISIN** directly, so rows bind to `stock_master`
+  without a symbol remap. Needs a desktop UA + `Referer` header; any archives
+  CSV equivalent (`/content/equities/corporate_actions.csv`) 404s and was
+  abandoned.
+- **Idempotency:** `corporate_actions` PK is
+  `(isin, ex_date, action_type, raw_subject)`; re-fetching the same window
+  upserts without duplication.
+
+### D-S9. Action taxonomy + subject parser
+- **Decision:** Classify the freeform `subject` field into
+  `BONUS | SPLIT | DIVIDEND | RIGHTS | BUYBACK | MERGER | CONSOLIDATION | INTEREST | OTHER`.
+  Only **BONUS** and **SPLIT** carry a non-1.0 `price_factor`.
+- **Ratio extraction:**
+  - `BONUS X:Y` → `price_factor = Y/(X+Y)` (e.g. 1:1 → 0.5; 4:1 → 0.2)
+  - `SPLIT From Rs A To Rs B` → `price_factor = B/A` (accepts `Re 1` variant)
+- **Compound subjects:** strings like `Bonus 4:1/Face Value Split ...` emit
+  two rows — one BONUS, one SPLIT — with distinct `action_type`s under the
+  same `raw_subject`. The compound PK prevents collisions.
+- **Explicit skips:** `Bonus Ncrps 1:116` (preference-share bonus) falls
+  through to `OTHER`; rights theoretical-ex-rights (TERP) math is deferred;
+  dividends are stored as metadata only (this slice is not a total-return
+  series).
+
+### D-S10. Raw-first storage with a materialized adjustment layer
+- **Decision:** `market_data` stores raw exchange OHLCV and never changes.
+  Adjustments live in three places:
+  1. `corporate_actions` — event log keyed on ISIN + ex_date + action_type.
+  2. `cumulative_adjustments(isin, trade_date, factor)` — materialized helper
+     holding only rows where `factor != 1.0`. Rebuilt in full from
+     `corporate_actions` + `market_data` on every CA ingest.
+  3. `adjusted_market_data` — read-only SQL view joining the above via
+     `COALESCE(factor, 1.0)`, exposing `adj_open/high/low/close/volume`.
+- **Adjustment semantics:** `factor(t) = Π price_factor(CA)` over all
+  price-adjusting CAs with `ex_date > t` (strictly greater). A bar **on**
+  `ex_date` is already ex-action and gets factor 1.0. Volume is divided by
+  the same factor.
+- **Rationale:** Keeps the audit trail (raw prices are exactly what NSE
+  published), makes adjustments reversible, and avoids having to mutate every
+  `market_data` row whenever a new CA appears.
+
+### D-S11. Scanner CLI grows CA commands
+- **Decision:** Two new subcommands plus a status extension:
+  - `scanner ca-ingest --start --end [--no-rebuild] [--db PATH]`
+  - `scanner ca-rebuild-adjustments [--db PATH]`
+  - `scanner status` now includes a `corporate_actions` block
+    (`total`, `by_type`, `earliest_ex_date`, `latest_ex_date`, `adjusted_bars`).
+- **Out of scope for this slice:** dividend-adjusted total-return series,
+  TERP for rights, merger/demerger handling, and BSE corporate actions
+  (will layer in alongside BSE bhavcopy ingestion).
+
