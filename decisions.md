@@ -633,3 +633,75 @@ rally couldn't be re-joined. Two targeted changes:
   `pending_exits` it should use the same helper so the acute evaluation
   matches the backtest exactly.
 
+
+
+### D-BT27 - Fast re-entry path (rebound bypass)
+
+- **Problem.** D-BT19/D-BT24 re-entry requires `price > 50DMA AND
+  price > 200DMA AND RS > 0 AND drawdown >= -15%`. After a V-shape
+  recovery (e.g. 2025) a name can reclaim its 50DMA and post positive
+  RS long before the 200DMA recaptures or the drawdown shallows past
+  -15%, so the position stays EXITED and misses the early leg of the
+  snap-back. The same gate is mirrored in `compute_refill_eligibility`
+  (D-BT22), so refill slots also skip these names.
+- **Decision.** Keep the primary gate unchanged and add a secondary
+  gate. Re-entry is allowed if **either**:
+  - Primary: `price > 50DMA AND price > 200DMA AND RS > 0 AND
+    drawdown >= EXIT_GATE_DRAWDOWN`; **or**
+  - Secondary (fast rebound): `price > 50DMA AND RS > 0 AND
+    rebound_from_low >= REFILL_REBOUND_THRESHOLD`, where
+    `rebound_from_low = price / rolling_min(close, REFILL_REBOUND_LOOKBACK) - 1`.
+- **Defaults.** `REFILL_REBOUND_LOOKBACK = 63` (~3 months of trading
+  days, i.e. "recent low"), `REFILL_REBOUND_THRESHOLD = 0.10` (10%
+  bounce off the local bottom).
+- **Implementation.**
+  - `StockMetrics.rebound_from_low: float = nan` (dataclass default so
+    existing call sites don't break).
+  - `util/ohlc.rolling_low()` helper added; `compute_metrics` computes
+    `rebound_from_low` from the price series.
+  - `strategy._reentry_primary` / `_reentry_fast` split out from the
+    old `_reentry_qualifies`; the EXIT -> REDUCE branch in `decide()`
+    emits a distinct reason string for each path.
+  - `backtest/phase0_strategy.compute_decisions` computes a rolling-
+    min frame and feeds `rebound_from_low` into the vectorised loop
+    so the backtest state machine mirrors the live path exactly.
+  - `compute_refill_eligibility` now returns `primary | secondary`
+    where `secondary = (price > 50DMA) AND (rebound >= threshold)`.
+    RS > 0 is still enforced at selection time in the simulator.
+- **Backtest results (2021-04 to 2026-04 vs v11 D-BT26):**
+
+  | Metric       | v10     | v11     | v12 (D-BT27) | Δ (v12-v11) |
+  |--------------|---------|---------|--------------|-------------|
+  | CAGR         | 17.55%  | 18.16%  | 17.01%       | -1.15 pp    |
+  | Sharpe       | 1.55    | 1.56    | 1.52         | -0.04       |
+  | MaxDD        | -17.73% | -13.57% | -12.00%      | **+1.57 pp**|
+  | Alpha (CAGR) | +3.55   | +4.16   | +3.01        | -1.15 pp    |
+  | Fills        | 2,037   | 2,120   | 2,676        | +26%        |
+  | Refills      | 178     | 209     | 297          | +42%        |
+
+  Per-year alpha (percentage points): 2021 -6.59 -> -4.26 (+2.33);
+  2022 +5.50 -> +8.09 (+2.59); 2023 +15.58 -> +6.87 (-8.71); 2024
+  +16.97 -> +14.43 (-2.54); 2025 -6.75 -> -9.51 (-2.76); 2026 -1.05
+  -> +0.86 (+1.91).
+- **Tradeoff.** The secondary gate does exactly what it was asked to
+  (more re-engagements during recoveries) and materially improves
+  MaxDD. But on this 5y window the extra names admitted under the
+  fast path - mostly sub-200DMA small/mid-caps that bounced 10% off
+  oversold lows - underperformed the primary-gate picks in 2023-25,
+  costing 1.15 pp of CAGR. 2021 and 2022 improve, 2023-25 regress.
+- **Tests:** `test_strategy.py::test_fast_reentry_bypasses_dd_and_200dma
+  _on_strong_rebound` covers the four relevant permutations (admit,
+  below 50DMA fails, below-threshold rebound fails, RS<=0 fails).
+  `test_backtest_strategy.py::test_refill_eligibility_fast_path_admits
+  _rebound_below_200dma` asserts the vectorised eligibility frame
+  admits a synthetic deep-drawdown-then-rebound stock.
+- **Live parity.** `compute_metrics` computes `rebound_from_low` from
+  the same rolling-min window the backtest uses, so the live analyzer
+  and backtest evaluate the secondary gate with identical inputs.
+- **Tuning knobs left for follow-up (not applied):**
+  - Raise `REFILL_REBOUND_THRESHOLD` (e.g. 0.15) to admit only stronger
+    bounces - would reduce small-cap noise at the cost of later entry.
+  - Shorten `REFILL_REBOUND_LOOKBACK` (e.g. 21) to pick the most recent
+    low, making the rebound signal more reactive.
+  - Gate the secondary path on a trend filter (e.g. only in UPTREND)
+    to avoid admitting weak names during DOWNTREND/SIDEWAYS chop.
