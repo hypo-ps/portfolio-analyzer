@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import logging
 import sqlite3
@@ -9,6 +10,10 @@ from typing import Iterable, Iterator
 
 from portfolio_analyzer import config as cfg
 from portfolio_analyzer.scanner.bhavcopy import BhavRow
+from portfolio_analyzer.scanner.corp_actions import (
+    PRICE_ADJUSTING_ACTIONS,
+    CorpAction,
+)
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +54,48 @@ SCHEMA = [
         rows_ingested INTEGER NOT NULL,
         ingested_at TEXT NOT NULL
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS corporate_actions (
+        isin TEXT NOT NULL,
+        ex_date TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        ratio_num REAL,
+        ratio_den REAL,
+        price_factor REAL NOT NULL DEFAULT 1.0,
+        raw_subject TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        name TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'NSE_CA_API',
+        ingested_at TEXT NOT NULL,
+        PRIMARY KEY (isin, ex_date, action_type, raw_subject)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ca_isin_exdate ON corporate_actions(isin, ex_date)",
+    "CREATE INDEX IF NOT EXISTS idx_ca_action_type ON corporate_actions(action_type)",
+    """
+    CREATE TABLE IF NOT EXISTS cumulative_adjustments (
+        isin TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        factor REAL NOT NULL,
+        PRIMARY KEY (isin, trade_date)
+    )
+    """,
+    """
+    CREATE VIEW IF NOT EXISTS adjusted_market_data AS
+    SELECT
+        m.isin,
+        m.trade_date,
+        m.open  * COALESCE(cf.factor, 1.0) AS adj_open,
+        m.high  * COALESCE(cf.factor, 1.0) AS adj_high,
+        m.low   * COALESCE(cf.factor, 1.0) AS adj_low,
+        m.close * COALESCE(cf.factor, 1.0) AS adj_close,
+        CAST(m.volume / COALESCE(cf.factor, 1.0) AS INTEGER) AS adj_volume,
+        m.open, m.high, m.low, m.close, m.volume,
+        COALESCE(cf.factor, 1.0) AS adjustment_factor
+    FROM market_data m
+    LEFT JOIN cumulative_adjustments cf
+      ON cf.isin = m.isin AND cf.trade_date = m.trade_date
     """,
 ]
 
@@ -179,4 +226,108 @@ def ingestion_summary(conn: sqlite3.Connection) -> dict[str, object]:
         "latest": None if last is None else {
             "trade_date": last[0], "rows": last[1], "ingested_at": last[2],
         },
+        "corporate_actions": corp_actions_summary(conn),
+    }
+
+
+def upsert_corp_actions(
+    conn: sqlite3.Connection, actions: Iterable[CorpAction],
+    *, source: str = "NSE_CA_API",
+) -> int:
+    now = dt.datetime.now().isoformat()
+    payload = [
+        (
+            a.isin, a.ex_date.isoformat(), a.action_type,
+            a.ratio_num, a.ratio_den, a.price_factor,
+            a.raw_subject, a.symbol, a.name, source, now,
+        )
+        for a in actions
+    ]
+    if not payload:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO corporate_actions
+            (isin, ex_date, action_type, ratio_num, ratio_den, price_factor,
+             raw_subject, symbol, name, source, ingested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(isin, ex_date, action_type, raw_subject) DO UPDATE SET
+            ratio_num = excluded.ratio_num,
+            ratio_den = excluded.ratio_den,
+            price_factor = excluded.price_factor,
+            symbol = excluded.symbol,
+            name = excluded.name,
+            source = excluded.source,
+            ingested_at = excluded.ingested_at
+        """,
+        payload,
+    )
+    return len(payload)
+
+
+def rebuild_cumulative_adjustments(conn: sqlite3.Connection) -> int:
+    """Materialize cumulative price-adjustment factors for every (isin, trade_date).
+
+    For a trade_date t, factor(t) = product of price_factor for every
+    price-adjusting CA with ex_date > t (strictly after). A bar on ex_date
+    itself is already ex-action and gets factor 1.0.
+    Only rows where factor != 1.0 are stored.
+    """
+    conn.execute("DELETE FROM cumulative_adjustments")
+    placeholders = ",".join("?" * len(PRICE_ADJUSTING_ACTIONS))
+    ca_rows = conn.execute(
+        f"SELECT isin, ex_date, price_factor FROM corporate_actions "
+        f"WHERE action_type IN ({placeholders}) ORDER BY isin, ex_date",
+        tuple(sorted(PRICE_ADJUSTING_ACTIONS)),
+    ).fetchall()
+
+    by_isin: dict[str, list[tuple[str, float]]] = {}
+    for isin, ex_date, pf in ca_rows:
+        by_isin.setdefault(isin, []).append((ex_date, pf))
+
+    insert_rows: list[tuple[str, str, float]] = []
+    for isin, events in by_isin.items():
+        trade_dates = [
+            r[0] for r in conn.execute(
+                "SELECT trade_date FROM market_data WHERE isin = ? ORDER BY trade_date",
+                (isin,),
+            ).fetchall()
+        ]
+        if not trade_dates:
+            continue
+        ex_dates = [e[0] for e in events]
+        suffix = [1.0] * (len(events) + 1)
+        for i in range(len(events) - 1, -1, -1):
+            suffix[i] = suffix[i + 1] * events[i][1]
+        for td in trade_dates:
+            idx = bisect.bisect_right(ex_dates, td)
+            cum = suffix[idx]
+            if cum != 1.0:
+                insert_rows.append((isin, td, cum))
+
+    if insert_rows:
+        conn.executemany(
+            "INSERT INTO cumulative_adjustments (isin, trade_date, factor) "
+            "VALUES (?, ?, ?)",
+            insert_rows,
+        )
+    return len(insert_rows)
+
+
+def corp_actions_summary(conn: sqlite3.Connection) -> dict[str, object]:
+    total = conn.execute("SELECT COUNT(*) FROM corporate_actions").fetchone()[0]
+    by_type_rows = conn.execute(
+        "SELECT action_type, COUNT(*) FROM corporate_actions "
+        "GROUP BY action_type ORDER BY action_type"
+    ).fetchall()
+    span = conn.execute(
+        "SELECT MIN(ex_date), MAX(ex_date) FROM corporate_actions"
+    ).fetchone()
+    adj_rows = conn.execute("SELECT COUNT(*) FROM cumulative_adjustments").fetchone()[0]
+    return {
+        "total": total,
+        "by_type": {t: c for t, c in by_type_rows},
+        "earliest_ex_date": span[0],
+        "latest_ex_date": span[1],
+        "adjusted_bars": adj_rows,
     }
