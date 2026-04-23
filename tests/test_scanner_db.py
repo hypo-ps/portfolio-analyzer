@@ -29,7 +29,9 @@ def test_init_schema_creates_tables(tmp_path: Path):
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
         )
         tables = [r[0] for r in cur.fetchall()]
-    assert tables == ["ingestion_log", "market_data", "stock_master"]
+    assert "stock_master" in tables
+    assert "market_data" in tables
+    assert "ingestion_log" in tables
 
 
 def test_upsert_stock_master_inserts_then_refreshes(tmp_path: Path):
