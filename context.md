@@ -17,6 +17,76 @@ market each day and produces actionable HOLD/REDUCE/EXIT decisions.
 - Cut weak stocks early
 - Hold leaders near highs
 
+## Target System (end-state)
+
+The full product is a four-layer decision system. Phase 0 builds the
+foundations for layer A (decisions) and the context inputs layer C depends on.
+Layers B and D are later phases; their shape is fixed here so Phase 0
+artefacts (metrics, state machine, data windows) are designed to feed them
+without rework.
+
+### A. Portfolio Advisor — per-holding decision
+
+```json
+{
+  "symbol": "XYZ",
+  "decision": "HOLD | REDUCE | EXIT | ADD",
+  "confidence": 0.0,
+  "reasons": {
+    "technical": "...",
+    "market_regime": "...",
+    "sector_strength": "...",
+    "fundamentals": "..."
+  }
+}
+```
+
+- Extends the current `HOLD | REDUCE | EXIT` contract with an `ADD` action
+  (re-arm / size-up for winners) and a scalar `confidence`.
+- `reasons` is structured (per-signal) rather than the flat list Phase 0
+  currently emits; each sub-key is sourced from one of the layers below.
+
+### B. Opportunity Engine — VCP-based watchlist
+
+```json
+{
+  "symbol": "ABC",
+  "setup": "VCP",
+  "stage": "early | mid | breakout-ready",
+  "score": 0.0,
+  "why": {
+    "structure": "...",
+    "volume": "...",
+    "trend": "...",
+    "sector": "..."
+  }
+}
+```
+
+- Scans beyond current holdings (NIFTY 500 pool already wired via D-BT22/23).
+- Detects VCP structure (Volatility Contraction Pattern): tightening
+  pullbacks, declining volume into the base, prior uptrend, breakout pivot.
+- Explicitly **out of scope for Phase 0** (see Non-goals).
+
+### C. Context Layer — market state feeding A and B
+
+- Market trend (blended NIFTY 500 + NIFTY 50 — implemented)
+- Breadth (% of NIFTY 500 above 50DMA — implemented)
+- Sector rotation (sector-level relative strength — partial; `sector_map`
+  exists, RS aggregation pending)
+- News sentiment (external feed; not started)
+
+### D. Fundamental Layer — quality filter
+
+- Growth quality (revenue/earnings CAGR, consistency)
+- Earnings trend (YoY / QoQ direction, beats/misses)
+- Profitability (ROE, ROCE, margin trend)
+- Debt (D/E, interest coverage)
+
+Consumed by A (feeds `reasons.fundamentals` + confidence) and B (VCP
+candidates filtered by minimum fundamental quality). Data source TBD;
+Phase 0 deliberately ignores fundamentals.
+
 ## Stack & Location
 
 - Language: Python
