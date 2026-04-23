@@ -200,7 +200,8 @@ def main() -> None:
     "out_path",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="Optional output JSON file. Default: stdout only.",
+    help="Output JSON file. Default: output/<today>.json (required for "
+    "D-BT17 prev-state and D-BT28 defer-queue continuity across runs).",
 )
 @click.option(
     "--no-refresh",
@@ -210,6 +211,8 @@ def main() -> None:
 )
 def run(out_path: Path | None, no_refresh: bool) -> None:
     """Run portfolio analysis and emit the JSON report."""
+    if out_path is None:
+        out_path = Path("output") / f"{dt.date.today().isoformat()}.json"
     run_analysis(out_path, do_refresh=not no_refresh)
 
 
