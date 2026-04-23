@@ -30,6 +30,42 @@ class StrategyResult:
     reason: str              # short human-readable cause
 
 
+@dataclass
+class DeferResolution:
+    """Outcome of applying the D-BT25/D-BT26 defer mechanics to a single symbol
+    for one run. Intended for the live analyzer; the backtest simulator runs
+    the same rules inline at T+1 open.
+    """
+    decision: str                        # HOLD | REDUCE | EXIT emitted today
+    prev_state: str                      # state fed into the machine this run
+    pending_days_remaining: int | None   # None if no pending; else >=1 to persist
+    event: str | None                    # enqueue|decrement|fire_acute|fire_expired|cancel_upgrade
+    reason: str
+
+
+def is_acute_breakdown(
+    px: float, prev_close: float, ma200: float, dd: float, rs: float,
+    dd_threshold: float = cfg.EXIT_DEFER_DD_THRESHOLD,
+    gap_pct: float = cfg.EXIT_DEFER_GAP_DOWN_PCT,
+) -> bool:
+    """D-BT26: EXIT fires immediately (no defer) in two situations.
+
+    1. Gap-down bypass: `(prev_close - px) / prev_close > gap_pct`.
+    2. Strong breakdown: price < 200DMA AND dd < dd_threshold AND rs < 0.
+
+    NaN inputs fail their individual leg (so missing history -> defer, the
+    protective default). Mild breakdowns (dd >= dd_threshold) or strong stocks
+    (rs >= 0) fall through to the defer timer.
+    """
+    if (not math.isnan(prev_close) and prev_close > 0 and not math.isnan(px)
+            and (prev_close - px) / prev_close > gap_pct):
+        return True
+    below_ma = not math.isnan(ma200) and ma200 > 0 and not math.isnan(px) and px < ma200
+    deep_dd = not math.isnan(dd) and dd < dd_threshold
+    weak_rs = not math.isnan(rs) and rs < 0
+    return below_ma and deep_dd and weak_rs
+
+
 def hard_gate_forces_exit(metrics: StockMetrics) -> bool:
     """EXIT is only permitted if at least one hard-gate condition holds."""
     if not math.isnan(metrics.ma_200) and metrics.price < metrics.ma_200:
@@ -110,3 +146,72 @@ def decide(prev_state: str, metrics: StockMetrics, raw_signal: str) -> StrategyR
     if metrics.trend == "STRONG" and rs_known and rs > 0:
         return StrategyResult(STATE_HOLD, raw_signal, "recovery upgrade: STRONG + RS>0")
     return StrategyResult(STATE_REDUCE, raw_signal, "hysteresis holds REDUCE")
+
+
+def resolve_with_defer(
+    prev_state: str,
+    metrics: StockMetrics,
+    raw_signal: str,
+    prev_close: float,
+    pending_days: int | None = None,
+    defer_days: int | None = None,
+    dd_threshold: float | None = None,
+    gap_pct: float | None = None,
+) -> DeferResolution:
+    """Live-parity wrapper around ``decide`` with D-BT25/D-BT26 defer mechanics.
+
+    ``pending_days`` is the remaining counter carried from yesterday's report
+    (None if the symbol is not currently deferred). ``prev_close`` is the
+    previous session's close used for the gap-down leg. Pass ``defer_days=0``
+    to bypass the timer entirely (legacy immediate-EXIT behaviour).
+    """
+    defer_days = cfg.EXIT_DEFER_DAYS if defer_days is None else defer_days
+    dd_threshold = cfg.EXIT_DEFER_DD_THRESHOLD if dd_threshold is None else dd_threshold
+    gap_pct = cfg.EXIT_DEFER_GAP_DOWN_PCT if gap_pct is None else gap_pct
+    if prev_state not in VALID_STATES:
+        prev_state = STATE_HOLD
+
+    if pending_days is not None and defer_days > 0:
+        today = decide(prev_state, metrics, raw_signal)
+        if today.decision != STATE_EXIT:
+            return DeferResolution(
+                today.decision, prev_state, None, "cancel_upgrade",
+                f"deferred EXIT cancelled: today's signal is {today.decision}",
+            )
+        acute = is_acute_breakdown(
+            metrics.price, prev_close, metrics.ma_200,
+            metrics.drawdown_from_high, metrics.relative_strength,
+            dd_threshold, gap_pct,
+        )
+        remaining = pending_days - 1
+        if not acute and remaining > 0:
+            return DeferResolution(
+                prev_state, prev_state, remaining, "decrement",
+                f"deferred EXIT pending ({remaining} day(s) left)",
+            )
+        return DeferResolution(
+            STATE_EXIT, prev_state, None,
+            "fire_acute" if acute else "fire_expired",
+            "acute breakdown: firing EXIT now" if acute
+            else "defer timer expired: firing EXIT",
+        )
+
+    result = decide(prev_state, metrics, raw_signal)
+    if result.decision != STATE_EXIT or defer_days <= 0:
+        return DeferResolution(
+            result.decision, prev_state, None, None, result.reason,
+        )
+    acute = is_acute_breakdown(
+        metrics.price, prev_close, metrics.ma_200,
+        metrics.drawdown_from_high, metrics.relative_strength,
+        dd_threshold, gap_pct,
+    )
+    if acute:
+        return DeferResolution(
+            STATE_EXIT, prev_state, None, "fire_acute",
+            "acute breakdown: EXIT fires immediately",
+        )
+    return DeferResolution(
+        prev_state, prev_state, defer_days, "enqueue",
+        f"EXIT deferred {defer_days} day(s): mild breakdown, awaiting confirmation",
+    )

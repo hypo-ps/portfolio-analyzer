@@ -9,6 +9,7 @@ import pandas as pd
 from portfolio_analyzer import config as cfg
 from portfolio_analyzer.backtest import broker
 from portfolio_analyzer.backtest.portfolio import Portfolio, STATE_EXITED, STATE_FULL, STATE_REDUCED
+from portfolio_analyzer.strategy import is_acute_breakdown as _is_acute_breakdown
 
 log = logging.getLogger(__name__)
 
@@ -33,28 +34,6 @@ class _State:
     portfolio: Portfolio
     fills: list[broker.Fill] = field(default_factory=list)
     last_decision: dict[str, str] = field(default_factory=dict)
-
-
-def _is_acute_breakdown(
-    px: float, prev_close: float, ma200: float, dd: float, rs: float,
-    dd_threshold: float, gap_pct: float,
-) -> bool:
-    """D-BT26: EXIT fires immediately (no defer) in two situations.
-
-    1. Gap-down bypass: today's open is `gap_pct` below yesterday's close.
-    2. Strong breakdown: price < 200DMA AND dd < dd_threshold AND rs < 0.
-
-    NaN inputs fail their individual leg (so missing history -> defer, the
-    protective default). Mild breakdowns (dd >= dd_threshold) or strong stocks
-    (rs >= 0) fall through to the defer timer.
-    """
-    if (not math.isnan(prev_close) and prev_close > 0 and not math.isnan(px)
-            and (prev_close - px) / prev_close > gap_pct):
-        return True
-    below_ma = not math.isnan(ma200) and ma200 > 0 and not math.isnan(px) and px < ma200
-    deep_dd = not math.isnan(dd) and dd < dd_threshold
-    weak_rs = not math.isnan(rs) and rs < 0
-    return below_ma and deep_dd and weak_rs
 
 
 def _would_breach_floor(portfolio: Portfolio, prices: dict[str, float],

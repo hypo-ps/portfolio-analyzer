@@ -41,11 +41,21 @@ class StockOut(BaseModel):
     reasons: list[str]
 
 
+class PendingExitOut(BaseModel):
+    """A symbol whose EXIT signal is being held in the D-BT25/D-BT26 defer
+    queue. `days_remaining` counts down to 0 on each subsequent run (D-BT28).
+    """
+    symbol: str
+    days_remaining: int
+    enqueued_date: str
+
+
 class ReportOut(BaseModel):
     date: str
     market: MarketOut
     portfolio_summary: PortfolioSummaryOut
     stocks: list[StockOut]
+    pending_exits: list[PendingExitOut] = Field(default_factory=list)
     top_performers: list[str] = Field(default_factory=list)
     weakest_stocks: list[str] = Field(default_factory=list)
 
@@ -80,6 +90,7 @@ def build_report(
     date_str: str,
     market: MarketState,
     scored_stocks: list[ScoredStock],
+    pending_exits: list[PendingExitOut] | None = None,
 ) -> ReportOut:
     stocks_out = [
         StockOut(
@@ -115,6 +126,7 @@ def build_report(
         ),
         portfolio_summary=summary,
         stocks=stocks_out,
+        pending_exits=list(pending_exits or []),
         top_performers=_rank_by_score(scored_stocks, reverse=True),
         weakest_stocks=_rank_by_score(scored_stocks, reverse=False),
     )
