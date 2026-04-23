@@ -142,6 +142,9 @@ If network fails, the refresh logs a warning and falls back to existing files.
       "reasons": ["..."]
     }
   ],
+  "pending_exits": [
+    {"symbol": "XYZ", "days_remaining": 2, "enqueued_date": "YYYY-MM-DD"}
+  ],
   "top_performers": ["..."],
   "weakest_stocks": ["..."]
 }
@@ -149,6 +152,11 @@ If network fails, the refresh logs a warning and falls back to existing files.
 
 Additive fields under `market` (pending approval): `breadth_pct`, `breadth_regime`,
 `nifty500_trend`, `nifty50_trend`. See `decisions.md`.
+
+`pending_exits` carries the D-BT25/D-BT26 defer queue between runs (D-BT28):
+each entry is a symbol whose EXIT signal has not yet been acted on, with a
+`days_remaining` counter that decrements each run until the timer expires or
+an acute breakdown fires the EXIT immediately.
 
 ## Definitions
 

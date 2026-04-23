@@ -629,7 +629,51 @@ rally couldn't be re-joined. Two targeted changes:
   `with_defer`: gap-down bypass, triple-gate immediate fire, RS>0 forces
   defer despite breakdown, and mild-dd defer. The old single-threshold
   acute test is replaced by these richer scenarios.
-- **Live parity:** still deferred. When the live pipeline persists
-  `pending_exits` it should use the same helper so the acute evaluation
-  matches the backtest exactly.
+- **Live parity:** implemented in D-BT28.
+
+
+### D-BT28. Live parity for the deferred-exit queue
+- **Problem:** the live analyzer was stateless across days apart from
+  yesterday's decision (D-BT17). It never deferred EXIT signals and never
+  emitted acute-bypass fires, so live output diverged from the v11 backtest
+  exactly when risk management matters most (mild breakdown chop vs sharp
+  drawdowns). Users running `python -m portfolio_analyzer run` got signals
+  closer to pre-D-BT25 behaviour.
+- **Decision:** port the D-BT25/D-BT26 defer mechanics into the live path
+  with full parity on the acute-breakdown predicate.
+- **Shared helper:** `strategy.is_acute_breakdown(px, prev_close, ma200, dd,
+  rs, ...)` now owns the triple-gate + gap-down logic. The simulator imports
+  it as `_is_acute_breakdown` so the predicate cannot drift between live and
+  backtest.
+- **Resolver:** `strategy.resolve_with_defer(prev_state, metrics, raw_signal,
+  prev_close, pending_days=None)` wraps `decide()` and returns a
+  `DeferResolution(decision, prev_state, pending_days_remaining, event,
+  reason)`. Event names match the simulator log: `enqueue`, `decrement`,
+  `fire_acute`, `fire_expired`, `cancel_upgrade`. When enqueued or
+  decrementing, `decision` is frozen to `prev_state` (the sell hasn't fired
+  yet) and `pending_days_remaining` is the carry-forward counter.
+- **Persistence:** `ReportOut.pending_exits: list[PendingExitOut]` now
+  round-trips in the daily JSON. `cli._load_previous_states` returns
+  `(prev_decisions, pending_exits)`; on each run, pending entries are
+  resolved first (fire/decrement/cancel) and any new mild EXIT is enqueued
+  with `days_remaining = EXIT_DEFER_DAYS` and `enqueued_date = today`.
+- **Gap-down in live:** the simulator uses `px = T+1 open` and
+  `prev_close = T close`. The live analyzer has close-only data, so it uses
+  `px = metrics.price` (today's close) and `prev_close = series.iloc[-2]`
+  (yesterday's close). This is a close-to-close proxy for the backtest's
+  open-gap check; it fires on single-day drops > 3% regardless of
+  intraday behaviour. Accepted tradeoff: fetching OHLC per holding for a
+  true open-gap measure was out of scope for this change.
+- **User-facing surfaces:**
+  - Per-stock `decision` stays `HOLD | REDUCE | EXIT` (no new action).
+  - Stocks in the defer queue show their current (pre-EXIT) decision plus
+    a `[defer] enqueue|decrement: …` line appended to `reasons`.
+  - The top-level `pending_exits` list surfaces every symbol still being
+    watched, with the countdown timer.
+- **Tests:** `tests/test_strategy.py` adds 10 new cases covering the acute
+  predicate (gap-down, triple-gate, NaN legs), the resolver (enqueue,
+  fire-on-enqueue, decrement, expiry, mid-defer acute, upgrade cancel,
+  `defer_days=0` bypass, and EXIT-from-EXIT). `tests/test_prev_state.py`
+  adds a pending-exits round-trip case and is updated for the new
+  `(states, pending)` return shape. 158 tests pass (was 147).
 
