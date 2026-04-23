@@ -73,6 +73,13 @@ NSE_CA_API_URL = "https://www.nseindia.com/api/corporates-corporateActions"
 NSE_CA_REFERER = "https://www.nseindia.com/companies-listing/corporate-filings-actions"
 NSE_CA_TIMEOUT = 60
 
+SCREENER_COMPANY_URL_TEMPLATE = "https://www.screener.in/company/{symbol}/{variant}/"
+SCREENER_VARIANTS = ("consolidated", "")  # prefer consolidated; fall back to standalone
+SCREENER_TIMEOUT = 30
+SCREENER_REQUEST_DELAY_SEC = 2.0
+SCREENER_MAX_RETRIES = 2
+SCREENER_REFRESH_AFTER_DAYS = 7
+
 
 @dataclass(frozen=True)
 class Credentials:

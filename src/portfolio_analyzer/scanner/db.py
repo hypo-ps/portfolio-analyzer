@@ -97,6 +97,85 @@ SCHEMA = [
     LEFT JOIN cumulative_adjustments cf
       ON cf.isin = m.isin AND cf.trade_date = m.trade_date
     """,
+    """
+    CREATE TABLE IF NOT EXISTS fundamentals_meta (
+        isin TEXT NOT NULL,
+        source TEXT NOT NULL,
+        sector TEXT,
+        industry TEXT,
+        market_cap_cr REAL,
+        current_price REAL,
+        face_value REAL,
+        book_value REAL,
+        stock_pe REAL,
+        dividend_yield REAL,
+        roe_latest REAL,
+        roce_latest REAL,
+        high_52w REAL,
+        low_52w REAL,
+        promoter_holding REAL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (isin, source),
+        FOREIGN KEY (isin) REFERENCES stock_master(isin)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS financials_annual (
+        isin TEXT NOT NULL,
+        fiscal_year INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        report_type TEXT NOT NULL DEFAULT 'consolidated',
+        sales_cr REAL,
+        expenses_cr REAL,
+        operating_profit_cr REAL,
+        opm_pct REAL,
+        other_income_cr REAL,
+        interest_cr REAL,
+        depreciation_cr REAL,
+        profit_before_tax_cr REAL,
+        tax_pct REAL,
+        net_profit_cr REAL,
+        eps REAL,
+        dividend_payout_pct REAL,
+        equity_capital_cr REAL,
+        reserves_cr REAL,
+        borrowings_cr REAL,
+        total_assets_cr REAL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (isin, fiscal_year, source, report_type),
+        FOREIGN KEY (isin) REFERENCES stock_master(isin)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ratios_annual (
+        isin TEXT NOT NULL,
+        fiscal_year INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        report_type TEXT NOT NULL DEFAULT 'consolidated',
+        roce_pct REAL,
+        debtor_days REAL,
+        inventory_days REAL,
+        days_payable REAL,
+        cash_conversion_cycle REAL,
+        working_capital_days REAL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (isin, fiscal_year, source, report_type),
+        FOREIGN KEY (isin) REFERENCES stock_master(isin)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fundamentals_ingestion_log (
+        isin TEXT NOT NULL,
+        source TEXT NOT NULL,
+        status TEXT NOT NULL,
+        detail TEXT,
+        report_type TEXT,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (isin, source)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_fin_annual_year ON financials_annual(fiscal_year)",
+    "CREATE INDEX IF NOT EXISTS idx_fund_meta_sector ON fundamentals_meta(sector)",
 ]
 
 
@@ -227,6 +306,7 @@ def ingestion_summary(conn: sqlite3.Connection) -> dict[str, object]:
             "trade_date": last[0], "rows": last[1], "ingested_at": last[2],
         },
         "corporate_actions": corp_actions_summary(conn),
+        "fundamentals": fundamentals_summary(conn),
     }
 
 
@@ -330,4 +410,153 @@ def corp_actions_summary(conn: sqlite3.Connection) -> dict[str, object]:
         "earliest_ex_date": span[0],
         "latest_ex_date": span[1],
         "adjusted_bars": adj_rows,
+    }
+
+
+
+_META_COLS = (
+    "sector", "industry", "market_cap_cr", "current_price", "face_value",
+    "book_value", "stock_pe", "dividend_yield", "roe_latest", "roce_latest",
+    "high_52w", "low_52w", "promoter_holding",
+)
+
+_FIN_ANNUAL_COLS = (
+    "sales_cr", "expenses_cr", "operating_profit_cr", "opm_pct",
+    "other_income_cr", "interest_cr", "depreciation_cr",
+    "profit_before_tax_cr", "tax_pct", "net_profit_cr", "eps",
+    "dividend_payout_pct", "equity_capital_cr", "reserves_cr",
+    "borrowings_cr", "total_assets_cr",
+)
+
+_RATIOS_ANNUAL_COLS = (
+    "roce_pct", "debtor_days", "inventory_days", "days_payable",
+    "cash_conversion_cycle", "working_capital_days",
+)
+
+
+def upsert_fundamentals_meta(
+    conn: sqlite3.Connection, isin: str, source: str, meta: dict[str, object],
+) -> None:
+    now = dt.datetime.now().isoformat()
+    values = [meta.get(c) for c in _META_COLS]
+    cols = ", ".join(("isin", "source", *_META_COLS, "fetched_at"))
+    placeholders = ", ".join(["?"] * (len(_META_COLS) + 3))
+    updates = ", ".join(f"{c} = excluded.{c}" for c in (*_META_COLS, "fetched_at"))
+    conn.execute(
+        f"INSERT INTO fundamentals_meta ({cols}) VALUES ({placeholders}) "
+        f"ON CONFLICT(isin, source) DO UPDATE SET {updates}",
+        (isin, source, *values, now),
+    )
+
+
+def upsert_financials_annual(
+    conn: sqlite3.Connection, isin: str, source: str, report_type: str,
+    rows: Iterable[dict[str, object]],
+) -> int:
+    now = dt.datetime.now().isoformat()
+    payload: list[tuple] = []
+    for r in rows:
+        year = r.get("fiscal_year")
+        if year is None:
+            continue
+        payload.append((
+            isin, int(year), source, report_type,
+            *[r.get(c) for c in _FIN_ANNUAL_COLS], now,
+        ))
+    if not payload:
+        return 0
+    cols = ", ".join(
+        ("isin", "fiscal_year", "source", "report_type", *_FIN_ANNUAL_COLS, "fetched_at")
+    )
+    placeholders = ", ".join(["?"] * (len(_FIN_ANNUAL_COLS) + 5))
+    updates = ", ".join(f"{c} = excluded.{c}" for c in (*_FIN_ANNUAL_COLS, "fetched_at"))
+    conn.executemany(
+        f"INSERT INTO financials_annual ({cols}) VALUES ({placeholders}) "
+        f"ON CONFLICT(isin, fiscal_year, source, report_type) DO UPDATE SET {updates}",
+        payload,
+    )
+    return len(payload)
+
+
+def upsert_ratios_annual(
+    conn: sqlite3.Connection, isin: str, source: str, report_type: str,
+    rows: Iterable[dict[str, object]],
+) -> int:
+    now = dt.datetime.now().isoformat()
+    payload: list[tuple] = []
+    for r in rows:
+        year = r.get("fiscal_year")
+        if year is None:
+            continue
+        payload.append((
+            isin, int(year), source, report_type,
+            *[r.get(c) for c in _RATIOS_ANNUAL_COLS], now,
+        ))
+    if not payload:
+        return 0
+    cols = ", ".join(
+        ("isin", "fiscal_year", "source", "report_type", *_RATIOS_ANNUAL_COLS, "fetched_at")
+    )
+    placeholders = ", ".join(["?"] * (len(_RATIOS_ANNUAL_COLS) + 5))
+    updates = ", ".join(f"{c} = excluded.{c}" for c in (*_RATIOS_ANNUAL_COLS, "fetched_at"))
+    conn.executemany(
+        f"INSERT INTO ratios_annual ({cols}) VALUES ({placeholders}) "
+        f"ON CONFLICT(isin, fiscal_year, source, report_type) DO UPDATE SET {updates}",
+        payload,
+    )
+    return len(payload)
+
+
+def record_fundamentals_ingestion(
+    conn: sqlite3.Connection, isin: str, source: str, status: str,
+    *, detail: str | None = None, report_type: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO fundamentals_ingestion_log
+            (isin, source, status, detail, report_type, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(isin, source) DO UPDATE SET
+            status = excluded.status,
+            detail = excluded.detail,
+            report_type = excluded.report_type,
+            fetched_at = excluded.fetched_at
+        """,
+        (isin, source, status, detail, report_type, dt.datetime.now().isoformat()),
+    )
+
+
+def last_fundamentals_fetch(
+    conn: sqlite3.Connection, isin: str, source: str,
+) -> dt.datetime | None:
+    row = conn.execute(
+        "SELECT fetched_at FROM fundamentals_ingestion_log "
+        "WHERE isin = ? AND source = ? AND status = 'ok'",
+        (isin, source),
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        return dt.datetime.fromisoformat(row[0])
+    except ValueError:
+        return None
+
+
+def fundamentals_summary(conn: sqlite3.Connection) -> dict[str, object]:
+    covered = conn.execute("SELECT COUNT(*) FROM fundamentals_meta").fetchone()[0]
+    annual = conn.execute("SELECT COUNT(*) FROM financials_annual").fetchone()[0]
+    ratios = conn.execute("SELECT COUNT(*) FROM ratios_annual").fetchone()[0]
+    by_status_rows = conn.execute(
+        "SELECT status, COUNT(*) FROM fundamentals_ingestion_log "
+        "GROUP BY status ORDER BY status"
+    ).fetchall()
+    last = conn.execute(
+        "SELECT MAX(fetched_at) FROM fundamentals_ingestion_log"
+    ).fetchone()[0]
+    return {
+        "companies_covered": covered,
+        "annual_rows": annual,
+        "ratios_rows": ratios,
+        "by_status": {s: c for s, c in by_status_rows},
+        "last_fetch": last,
     }
