@@ -2,8 +2,19 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from portfolio_analyzer import config as cfg
 from portfolio_analyzer.backtest import simulator
+
+
+@pytest.fixture(autouse=True)
+def _zero_costs(monkeypatch, request):
+    """Isolate simulator tests from realistic costs/slippage."""
+    if "with_costs" in request.keywords:
+        return
+    monkeypatch.setattr(cfg, "TRANSACTION_COST_BPS", 0.0)
+    monkeypatch.setattr(cfg, "SLIPPAGE_BPS", 0.0)
 
 
 def _bdates(n: int, start: str = "2024-01-02") -> pd.DatetimeIndex:
@@ -556,3 +567,29 @@ def test_refill_top_k_truncates_candidate_list(monkeypatch):
         candidate_symbols=pool,
     )
     assert list(res.refill_history['symbol']) == ['W', 'Y']
+
+
+
+@pytest.mark.with_costs
+def test_costs_and_slippage_are_wired_through_config(monkeypatch):
+    """End-to-end: config BPS values flow into init BUY and produce a cost field."""
+    monkeypatch.setattr(cfg, "TRANSACTION_COST_BPS", 0.001)
+    monkeypatch.setattr(cfg, "SLIPPAGE_BPS", 0.00075)
+    dates = _bdates(3)
+    opens = pd.DataFrame({"A": [100.0] * 3}, index=dates)
+    closes = pd.DataFrame({"A": [100.0] * 3}, index=dates)
+    decisions = pd.DataFrame("HOLD", index=dates, columns=["A"])
+    res = simulator.run_simulation(
+        start_date=dates[0], end_date=dates[-1],
+        initial_capital=10_000.0, holding_symbols=["A"],
+        open_df=opens, close_df=closes, decisions=decisions,
+    )
+    init = next(f for f in res.fills if f.reason == "INIT")
+    # Slippage widens exec price: 100 * (1 + 0.00075) = 100.075
+    assert abs(init.price - 100.075) < 1e-9
+    # Spend = 10000 / (1 + cost_bps); fee = spend * cost_bps
+    expected_spend = 10_000.0 / 1.001
+    assert abs(init.cost - expected_spend * 0.001) < 1e-6
+    assert abs(init.shares - (expected_spend / 100.075)) < 1e-9
+    # Flat prices + costs erode final equity below initial capital
+    assert res.ending_equity < 10_000.0

@@ -160,3 +160,46 @@ def test_reenter_clips_to_available_cash():
     assert fill is not None
     assert abs(p.cash) < 1e-6  # all cash consumed
     assert abs(fill.shares - 54.0) < 1e-9
+
+
+def test_buy_applies_slippage_and_fee():
+    p = _fresh_portfolio(100_000)
+    fill = broker.buy(
+        p, "2024-01-02", "INFY", price=1000.0, rupees=50_000.0,
+        slippage_bps=0.001, cost_bps=0.001,
+    )
+    assert fill is not None
+    # exec price = 1000 * 1.001 = 1001; shares = 50000/1001
+    assert abs(fill.price - 1001.0) < 1e-9
+    assert abs(fill.shares - (50_000.0 / 1001.0)) < 1e-9
+    assert abs(fill.cost - 50.0) < 1e-9  # 50000 * 0.001
+    assert abs(p.cash - (100_000.0 - 50_000.0 - 50.0)) < 1e-9
+    assert abs(p.positions["INFY"].avg_cost - 1001.0) < 1e-9
+
+
+def test_buy_respects_cash_with_fee():
+    p = _fresh_portfolio(1000.0)
+    fill = broker.buy(
+        p, "2024-01-02", "INFY", price=100.0, rupees=5000.0,
+        slippage_bps=0.0, cost_bps=0.001,
+    )
+    assert fill is not None
+    # spend clipped so spend+fee <= cash: spend ~= 1000/1.001
+    assert p.cash >= -1e-9 and p.cash < 1e-6
+    assert abs(fill.shares * fill.price + fill.cost - 1000.0) < 1e-6
+
+
+def test_sell_applies_slippage_and_fee():
+    p = _fresh_portfolio(100_000)
+    broker.buy(p, "2024-01-02", "INFY", 1000.0, 50_000.0)   # 50 shares, cash=50k
+    fill = broker.exit_position(
+        p, "2024-02-01", "INFY", price=1200.0,
+        slippage_bps=0.001, cost_bps=0.001,
+    )
+    assert fill is not None
+    # exec = 1200 * 0.999 = 1198.8; proceeds = 50 * 1198.8 = 59940
+    # fee = 59940 * 0.001 = 59.94; cash += 59940 - 59.94
+    assert abs(fill.price - 1198.8) < 1e-9
+    assert abs(fill.cost - 59.94) < 1e-6
+    assert abs(p.cash - (50_000.0 + 59_940.0 - 59.94)) < 1e-6
+    assert p.positions["INFY"].state == STATE_EXITED

@@ -243,7 +243,10 @@ def run_simulation(
         if math.isnan(px) or px <= 0:
             log.warning("init: no open price for %s on %s; skipped", sym, dates[0].date())
             continue
-        fill = broker.buy(state.portfolio, str(dates[0].date()), sym, px, per_stock_rupees, reason="INIT")
+        fill = broker.buy(state.portfolio, str(dates[0].date()), sym, px,
+                          per_stock_rupees, reason="INIT",
+                          slippage_bps=cfg.SLIPPAGE_BPS,
+                          cost_bps=cfg.TRANSACTION_COST_BPS)
         if fill is not None:
             state.fills.append(fill)
             state.last_decision[sym] = "HOLD"
@@ -267,6 +270,7 @@ def run_simulation(
     refill_fraction = cfg.REFILL_ALLOCATION_FRACTION
     refill_external_cap = cfg.REFILL_EXTERNAL_EXPOSURE_CAP
     refill_top_k = cfg.REFILL_TOP_K
+    fee_kw = {"slippage_bps": cfg.SLIPPAGE_BPS, "cost_bps": cfg.TRANSACTION_COST_BPS}
     core_set = set(holding_symbols)
     if candidate_symbols is None:
         candidate_symbols = list(holding_symbols)
@@ -301,14 +305,17 @@ def run_simulation(
                 if new_dec == "REDUCE" and prev_dec == "EXIT":
                     target_rupees = initial_allocation.get(sym, 0.0) * reentry_fraction
                     fill = broker.reenter(
-                        state.portfolio, str(t_now.date()), sym, px, target_rupees, reason="REENTRY"
+                        state.portfolio, str(t_now.date()), sym, px, target_rupees,
+                        reason="REENTRY", **fee_kw,
                     )
                     if fill is None:
                         continue  # no cash or other block -> do not advance state
                 elif new_dec == "REDUCE":
-                    fill = broker.reduce_half(state.portfolio, str(t_now.date()), sym, px, reason="REDUCE")
+                    fill = broker.reduce_half(state.portfolio, str(t_now.date()), sym, px,
+                                              reason="REDUCE", **fee_kw)
                 elif new_dec == "EXIT":
-                    fill = broker.exit_position(state.portfolio, str(t_now.date()), sym, px, reason="EXIT")
+                    fill = broker.exit_position(state.portfolio, str(t_now.date()), sym, px,
+                                                reason="EXIT", **fee_kw)
                 elif new_dec == "HOLD" and prev_dec == "REDUCE":
                     pos = state.portfolio.positions.get(sym)
                     if pos is not None and pos.state == STATE_REDUCED:
@@ -329,7 +336,8 @@ def run_simulation(
             for sym, rupees in plan:
                 px = float(open_row[sym])
                 buy_fill = broker.buy(
-                    state.portfolio, str(t_now.date()), sym, px, rupees, reason="REARM",
+                    state.portfolio, str(t_now.date()), sym, px, rupees,
+                    reason="REARM", **fee_kw,
                 )
                 if buy_fill is None:
                     continue
@@ -354,7 +362,8 @@ def run_simulation(
             for sym, rupees in plan:
                 px = float(open_row[sym])
                 buy_fill = broker.buy(
-                    state.portfolio, str(t_now.date()), sym, px, rupees, reason="REFILL",
+                    state.portfolio, str(t_now.date()), sym, px, rupees,
+                    reason="REFILL", **fee_kw,
                 )
                 if buy_fill is None:
                     continue

@@ -37,6 +37,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "with_costs: opt-out of the simulator-test zero-cost autouse fixture",
+]
 
 [tool.ruff]
 line-length = 100
