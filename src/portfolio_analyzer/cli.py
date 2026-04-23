@@ -263,5 +263,87 @@ def tui(input_paths: tuple[Path, ...]) -> None:
     run_tui(list(input_paths))
 
 
+@main.group()
+def scanner() -> None:
+    """Phase 1 NSE/BSE scanner commands (bhavcopy ingestion, OHLCV storage)."""
+
+
+def _db_option(f):
+    return click.option(
+        "--db", "db_path", type=click.Path(dir_okay=False, path_type=Path),
+        default=None, help="SQLite DB path. Default: data/scanner.db.",
+    )(f)
+
+
+@scanner.command("ingest")
+@click.option("--date", "date_str", type=str, required=True,
+              help="Trade date to ingest (YYYY-MM-DD).")
+@click.option("--force", is_flag=True, default=False,
+              help="Re-ingest even if this date is already in the log.")
+@_db_option
+def scanner_ingest(date_str: str, force: bool, db_path: Path | None) -> None:
+    """Ingest the NSE bhavcopy for a single trade date."""
+    from portfolio_analyzer.scanner.ingest import ingest_date
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    trade_date = dt.date.fromisoformat(date_str)
+    result = ingest_date(trade_date, db_path=db_path, force=force)
+    sys.stdout.write(json.dumps({
+        "trade_date": result.trade_date.isoformat(),
+        "status": result.status,
+        "rows": result.rows,
+        "detail": result.detail,
+    }, indent=2) + "\n")
+    if result.status == "error":
+        sys.exit(1)
+
+
+@scanner.command("ingest-range")
+@click.option("--start", "start_str", type=str, required=True,
+              help="Start date (YYYY-MM-DD), inclusive.")
+@click.option("--end", "end_str", type=str, required=True,
+              help="End date (YYYY-MM-DD), inclusive.")
+@click.option("--force", is_flag=True, default=False,
+              help="Re-ingest dates already in the log.")
+@_db_option
+def scanner_ingest_range(
+    start_str: str, end_str: str, force: bool, db_path: Path | None,
+) -> None:
+    """Ingest NSE bhavcopies for every weekday in [start, end]."""
+    from portfolio_analyzer.scanner.ingest import ingest_range
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    start = dt.date.fromisoformat(start_str)
+    end = dt.date.fromisoformat(end_str)
+    results = ingest_range(start, end, db_path=db_path, force=force)
+    summary = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "counts": {
+            status: sum(1 for r in results if r.status == status)
+            for status in ("ingested", "skipped", "no_data", "error")
+        },
+        "total_rows": sum(r.rows for r in results),
+    }
+    sys.stdout.write(json.dumps(summary, indent=2) + "\n")
+
+
+@scanner.command("status")
+@_db_option
+def scanner_status(db_path: Path | None) -> None:
+    """Print a summary of what's in the scanner DB."""
+    from portfolio_analyzer.scanner.db import default_db_path, ingestion_summary, open_db
+
+    path = db_path or default_db_path()
+    if not path.exists():
+        sys.stdout.write(json.dumps({"db": str(path), "exists": False}, indent=2) + "\n")
+        return
+    with open_db(path) as conn:
+        summary = ingestion_summary(conn)
+    summary["db"] = str(path)
+    summary["exists"] = True
+    sys.stdout.write(json.dumps(summary, indent=2) + "\n")
+
+
 if __name__ == "__main__":
     main()
