@@ -9,4 +9,8 @@ build/
 dist/
 output/*.json
 data/backtest_cache/
+data/scanner.db
+data/scanner.db-journal
+data/scanner.db-wal
+data/scanner.db-shm
 output/*.csv
