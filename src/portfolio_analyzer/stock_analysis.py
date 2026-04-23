@@ -21,7 +21,6 @@ class StockMetrics:
     drawdown_from_high: float
     trend: str  # "STRONG" | "WEAK"
     insufficient_history: bool
-    rebound_from_low: float = math.nan  # D-BT27: (price / rolling_low) - 1
 
 
 def classify_trend(price: float, ma50: float, ma200: float) -> str:
@@ -39,8 +38,6 @@ def compute_metrics(symbol: str, close: pd.Series, market_return_50d: float) -> 
     high52 = ohlc.rolling_high(close, cfg.HIGH_52W_WINDOW)
     ret50 = ohlc.return_over(close, cfg.RETURN_WINDOW)
     drawdown = ohlc.pct_from_high(price, high52)
-    low_n = ohlc.rolling_low(close, cfg.REFILL_REBOUND_LOOKBACK)
-    rebound = math.nan if math.isnan(low_n) or low_n <= 0 else price / low_n - 1.0
     rs = math.nan if math.isnan(ret50) or math.isnan(market_return_50d) else ret50 - market_return_50d
     insufficient = math.isnan(ma200) or math.isnan(ret50)
     return StockMetrics(
@@ -54,5 +51,4 @@ def compute_metrics(symbol: str, close: pd.Series, market_return_50d: float) -> 
         drawdown_from_high=drawdown,
         trend=classify_trend(price, ma50, ma200),
         insufficient_history=insufficient,
-        rebound_from_low=rebound,
     )

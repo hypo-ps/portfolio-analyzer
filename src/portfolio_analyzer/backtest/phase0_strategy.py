@@ -119,10 +119,8 @@ def compute_decisions(
     ma50 = holding_close.rolling(cfg.MA_SHORT).mean()
     ma200 = holding_close.rolling(cfg.MA_LONG).mean()
     high_52w = holding_close.rolling(cfg.HIGH_52W_WINDOW).max()
-    low_n = holding_close.rolling(cfg.REFILL_REBOUND_LOOKBACK).min()
     ret50 = holding_close / holding_close.shift(cfg.RETURN_WINDOW) - 1.0
     drawdown = holding_close / high_52w - 1.0
-    rebound = holding_close / low_n - 1.0
     market_ret50 = (nifty500_close / nifty500_close.shift(cfg.RETURN_WINDOW) - 1.0).reindex(idx, method="ffill")
     rs = ret50.sub(market_ret50, axis=0)
     raw = _raw_signal_frame(holding_close, ma50, ma200, drawdown, rs, ret50)
@@ -134,7 +132,6 @@ def compute_decisions(
     ret_np = ret50.to_numpy(dtype=float, na_value=np.nan)
     dd_np = drawdown.to_numpy(dtype=float, na_value=np.nan)
     rs_np = rs.to_numpy(dtype=float, na_value=np.nan)
-    reb_np = rebound.to_numpy(dtype=float, na_value=np.nan)
     raw_np = raw.to_numpy(dtype=object)
     out_np = np.empty_like(raw_np, dtype=object)
 
@@ -153,7 +150,6 @@ def compute_decisions(
                 relative_strength=rs_np[i, j], drawdown_from_high=dd_np[i, j],
                 trend=trend,
                 insufficient_history=math.isnan(m200) or math.isnan(ret_np[i, j]),
-                rebound_from_low=reb_np[i, j],
             )
             result = strategy.decide(prev, metrics, raw_np[i, j])
             out_np[i, j] = result.decision
@@ -164,21 +160,17 @@ def compute_decisions(
 
 
 def compute_refill_eligibility(holding_close: pd.DataFrame) -> pd.DataFrame:
-    """Boolean (date x symbol) frame where refill entries are permitted.
+    """Boolean (date x symbol) frame where refill entries are permitted (D-BT22).
 
-    Primary gate (D-BT22): price > 50DMA AND price > 200DMA AND drawdown >=
-    EXIT_GATE_DRAWDOWN, mirroring the re-entry primary path.
-    Secondary gate (D-BT27): price > 50DMA AND rebound from rolling low >=
-    REFILL_REBOUND_THRESHOLD, bypassing the 200DMA / drawdown checks so
-    V-shape recoveries can re-engage. RS > 0 is enforced at selection time.
+    Requires the negation of the EXIT hard-gate (price >= 200DMA AND drawdown
+    >= EXIT_GATE_DRAWDOWN) plus price > 50DMA. This mirrors `strategy.hard_
+    gate_forces_exit()` so refill cannot pick names the decision matrix is
+    still emitting EXIT for. RS > 0 is enforced at selection time.
     """
     ma50 = holding_close.rolling(cfg.MA_SHORT).mean()
     ma200 = holding_close.rolling(cfg.MA_LONG).mean()
     high_52w = holding_close.rolling(cfg.HIGH_52W_WINDOW).max()
-    low_n = holding_close.rolling(cfg.REFILL_REBOUND_LOOKBACK).min()
     drawdown = holding_close / high_52w - 1.0
-    rebound = holding_close / low_n - 1.0
-    above_50 = holding_close > ma50
-    primary = above_50 & (holding_close > ma200) & (drawdown >= cfg.EXIT_GATE_DRAWDOWN)
-    secondary = above_50 & (rebound >= cfg.REFILL_REBOUND_THRESHOLD)
-    return (primary | secondary).fillna(False)
+    above_mas = (holding_close > ma50) & (holding_close > ma200)
+    not_hard_gated = drawdown >= cfg.EXIT_GATE_DRAWDOWN
+    return (above_mas & not_hard_gated).fillna(False)

@@ -7,12 +7,11 @@ from portfolio_analyzer.stock_analysis import StockMetrics
 
 
 def _m(*, price: float = 100.0, ma200: float = 90.0, dd: float = -0.05,
-       trend: str = "STRONG", rs: float = 0.02,
-       rebound: float = float("nan")) -> StockMetrics:
+       trend: str = "STRONG", rs: float = 0.02) -> StockMetrics:
     return StockMetrics(
         symbol="X", price=price, ma_50=95.0, ma_200=ma200, high_52w=120.0,
         return_50d=0.05, relative_strength=rs, drawdown_from_high=dd,
-        trend=trend, insufficient_history=False, rebound_from_low=rebound,
+        trend=trend, insufficient_history=False,
     )
 
 
@@ -129,30 +128,6 @@ def test_reentry_blocked_when_drawdown_below_exit_gate():
                          _m(price=200.0, ma200=90.0, rs=0.10, dd=-0.10),
                          strategy.STATE_HOLD)
     assert r2.decision == strategy.STATE_REDUCE
-
-
-def test_fast_reentry_bypasses_dd_and_200dma_on_strong_rebound():
-    # D-BT27: price < 200DMA AND dd < -15% -> primary gate fails.
-    # But price > 50DMA, RS > 0, and rebound >= 10% -> fast path allows REDUCE.
-    r = strategy.decide(strategy.STATE_EXIT,
-                        _m(price=100.0, ma200=120.0, rs=0.05, dd=-0.30, rebound=0.15),
-                        strategy.STATE_HOLD)
-    assert r.decision == strategy.STATE_REDUCE
-    # Below 50DMA -> fast path must still fail.
-    r2 = strategy.decide(strategy.STATE_EXIT,
-                         _m(price=90.0, ma200=120.0, rs=0.05, dd=-0.30, rebound=0.15),
-                         strategy.STATE_HOLD)
-    assert r2.decision == strategy.STATE_EXIT
-    # Rebound below threshold -> fast path fails.
-    r3 = strategy.decide(strategy.STATE_EXIT,
-                         _m(price=100.0, ma200=120.0, rs=0.05, dd=-0.30, rebound=0.05),
-                         strategy.STATE_HOLD)
-    assert r3.decision == strategy.STATE_EXIT
-    # RS <= 0 -> fast path fails even with strong rebound.
-    r4 = strategy.decide(strategy.STATE_EXIT,
-                         _m(price=100.0, ma200=120.0, rs=-0.01, dd=-0.30, rebound=0.20),
-                         strategy.STATE_HOLD)
-    assert r4.decision == strategy.STATE_EXIT
 
 
 

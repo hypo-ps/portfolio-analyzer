@@ -27,12 +27,6 @@ def rolling_high(close: pd.Series, window: int) -> float:
     return float(close.iloc[-window:].max())
 
 
-def rolling_low(close: pd.Series, window: int) -> float:
-    if len(close) == 0:
-        return math.nan
-    return float(close.iloc[-window:].min())
-
-
 def pct_from_high(price: float, high: float) -> float:
     if high == 0 or math.isnan(high):
         return math.nan
