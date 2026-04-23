@@ -219,5 +219,15 @@ def backtest(start_str: str | None, end_str: str | None, years: int,
     sys.stdout.write(json.dumps(report, indent=2, default=str) + "\n")
 
 
+@main.command()
+@click.option("--input", "input_path", required=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Backtest JSON report. Companion CSVs must share its stem.")
+def tui(input_path: Path) -> None:
+    """Launch an interactive TUI to explore a backtest run."""
+    from portfolio_analyzer.tui.app import run_tui
+    run_tui(input_path)
+
+
 if __name__ == "__main__":
     main()
