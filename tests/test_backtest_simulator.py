@@ -631,15 +631,15 @@ def test_exit_defer_timer_fires_after_n_business_days(monkeypatch):
 
 
 @pytest.mark.with_defer
-def test_exit_defer_acute_breakdown_bypasses_timer(monkeypatch):
-    # D-BT25: price << 200DMA fires SELL on the next open, same day the signal would.
+def test_exit_defer_gap_down_bypasses_timer(monkeypatch):
+    # D-BT26: gap-down > 3% overnight bypasses the defer timer unconditionally.
     monkeypatch.setattr(cfg, "EXIT_DEFER_DAYS", 2)
     monkeypatch.setattr(cfg, "MA_LONG", 2)
+    monkeypatch.setattr(cfg, "EXIT_DEFER_GAP_DOWN_PCT", 0.03)
     dates = _bdates(5)
-    # Close on day 1 drops hard; ma200 on day 1 = mean(100, 80) = 90; day 2 open = 80.
-    # 80 < 90 * 0.95 = 85.5 -> acute.
-    opens = pd.DataFrame({"A": [100.0, 100.0, 80.0, 80.0, 80.0]}, index=dates)
-    closes = pd.DataFrame({"A": [100.0, 80.0, 80.0, 80.0, 80.0]}, index=dates)
+    # prev_close (day 1) = 100; open (day 2) = 96 -> gap_down = 4% > 3%.
+    opens = pd.DataFrame({"A": [100.0, 100.0, 96.0, 96.0, 96.0]}, index=dates)
+    closes = pd.DataFrame({"A": [100.0, 100.0, 96.0, 96.0, 96.0]}, index=dates)
     sig = pd.DataFrame({"A": ["HOLD", "EXIT", "EXIT", "EXIT", "EXIT"]}, index=dates)
     res = simulator.run_simulation(
         start_date=dates[0], end_date=dates[-1],
@@ -651,6 +651,82 @@ def test_exit_defer_acute_breakdown_bypasses_timer(monkeypatch):
     assert sells[0].reason == "EXIT_ACUTE"
     assert sells[0].date == str(dates[2].date())  # next open after signal, no delay
     assert "fire_acute" in set(res.defer_history["event"])
+
+
+@pytest.mark.with_defer
+def test_exit_defer_triple_gate_breakdown_fires_immediately(monkeypatch):
+    # D-BT26 Case 1: price<ma200 AND dd<-10% AND rs<0 -> acute, no defer.
+    monkeypatch.setattr(cfg, "EXIT_DEFER_DAYS", 2)
+    monkeypatch.setattr(cfg, "MA_LONG", 2)
+    monkeypatch.setattr(cfg, "HIGH_52W_WINDOW", 2)
+    monkeypatch.setattr(cfg, "EXIT_DEFER_DD_THRESHOLD", -0.10)
+    dates = _bdates(5)
+    # Drift down gently so gap-down stays <3% but ma200 and drawdown trip.
+    # day 1 close = 88, day 2 open = 87 -> gap = ~1.1% (below 3% bypass).
+    # high52 on day 1 = max(100, 88) = 100; dd = 88/100 - 1 = -0.12 < -0.10.
+    # ma200 on day 1 = (100+88)/2 = 94; day 2 open = 87 < 94.
+    opens = pd.DataFrame({"A": [100.0, 100.0, 87.0, 87.0, 87.0]}, index=dates)
+    closes = pd.DataFrame({"A": [100.0, 88.0, 87.0, 87.0, 87.0]}, index=dates)
+    sig = pd.DataFrame({"A": ["HOLD", "EXIT", "EXIT", "EXIT", "EXIT"]}, index=dates)
+    # RS < 0 required for Case 1; pass a rank_df with constant negative RS.
+    rs = pd.DataFrame({"A": [-0.1] * 5}, index=dates)
+    res = simulator.run_simulation(
+        start_date=dates[0], end_date=dates[-1],
+        initial_capital=1000.0, holding_symbols=["A"],
+        open_df=opens, close_df=closes, decisions=sig, rank_df=rs,
+    )
+    sells = [f for f in res.fills if f.side == "SELL"]
+    assert len(sells) == 1
+    assert sells[0].reason == "EXIT_ACUTE"
+    assert sells[0].date == str(dates[2].date())
+
+
+@pytest.mark.with_defer
+def test_exit_defer_strong_rs_forces_defer_despite_breakdown(monkeypatch):
+    # D-BT26 Case 3: RS > 0 allows the defer even if price<ma200 and dd is deep.
+    monkeypatch.setattr(cfg, "EXIT_DEFER_DAYS", 2)
+    monkeypatch.setattr(cfg, "MA_LONG", 2)
+    monkeypatch.setattr(cfg, "HIGH_52W_WINDOW", 2)
+    dates = _bdates(6)
+    opens = pd.DataFrame({"A": [100.0, 100.0, 87.0, 87.0, 87.0, 87.0]}, index=dates)
+    closes = pd.DataFrame({"A": [100.0, 88.0, 87.0, 87.0, 87.0, 87.0]}, index=dates)
+    sig = pd.DataFrame({"A": ["HOLD", "EXIT", "EXIT", "EXIT", "EXIT", "EXIT"]}, index=dates)
+    rs = pd.DataFrame({"A": [0.05] * 6}, index=dates)  # strong: protects from acute
+    res = simulator.run_simulation(
+        start_date=dates[0], end_date=dates[-1],
+        initial_capital=1000.0, holding_symbols=["A"],
+        open_df=opens, close_df=closes, decisions=sig, rank_df=rs,
+    )
+    sells = [f for f in res.fills if f.side == "SELL"]
+    assert len(sells) == 1
+    assert sells[0].reason == "EXIT_DEFERRED"  # fired by timer, not acute
+    events = set(res.defer_history["event"])
+    assert "fire_acute" not in events
+    assert {"enqueue", "fire_expired"} <= events
+
+
+@pytest.mark.with_defer
+def test_exit_defer_mild_breakdown_defers(monkeypatch):
+    # D-BT26 Case 2: price just below ma200 but dd > -10% -> defer applies.
+    monkeypatch.setattr(cfg, "EXIT_DEFER_DAYS", 2)
+    monkeypatch.setattr(cfg, "MA_LONG", 2)
+    monkeypatch.setattr(cfg, "HIGH_52W_WINDOW", 2)
+    dates = _bdates(6)
+    # Mild pullback: 100 -> 95 (dd = -5%), still below ma200 = 97.5.
+    opens = pd.DataFrame({"A": [100.0, 100.0, 95.0, 95.0, 95.0, 95.0]}, index=dates)
+    closes = pd.DataFrame({"A": [100.0, 95.0, 95.0, 95.0, 95.0, 95.0]}, index=dates)
+    sig = pd.DataFrame({"A": ["HOLD", "EXIT", "EXIT", "EXIT", "EXIT", "EXIT"]}, index=dates)
+    rs = pd.DataFrame({"A": [-0.1] * 6}, index=dates)
+    res = simulator.run_simulation(
+        start_date=dates[0], end_date=dates[-1],
+        initial_capital=1000.0, holding_symbols=["A"],
+        open_df=opens, close_df=closes, decisions=sig, rank_df=rs,
+    )
+    sells = [f for f in res.fills if f.side == "SELL"]
+    assert len(sells) == 1
+    assert sells[0].reason == "EXIT_DEFERRED"
+    events = set(res.defer_history["event"])
+    assert "fire_acute" not in events
 
 
 @pytest.mark.with_defer

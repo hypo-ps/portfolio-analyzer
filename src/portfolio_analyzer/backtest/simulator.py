@@ -35,6 +35,28 @@ class _State:
     last_decision: dict[str, str] = field(default_factory=dict)
 
 
+def _is_acute_breakdown(
+    px: float, prev_close: float, ma200: float, dd: float, rs: float,
+    dd_threshold: float, gap_pct: float,
+) -> bool:
+    """D-BT26: EXIT fires immediately (no defer) in two situations.
+
+    1. Gap-down bypass: today's open is `gap_pct` below yesterday's close.
+    2. Strong breakdown: price < 200DMA AND dd < dd_threshold AND rs < 0.
+
+    NaN inputs fail their individual leg (so missing history -> defer, the
+    protective default). Mild breakdowns (dd >= dd_threshold) or strong stocks
+    (rs >= 0) fall through to the defer timer.
+    """
+    if (not math.isnan(prev_close) and prev_close > 0 and not math.isnan(px)
+            and (prev_close - px) / prev_close > gap_pct):
+        return True
+    below_ma = not math.isnan(ma200) and ma200 > 0 and not math.isnan(px) and px < ma200
+    deep_dd = not math.isnan(dd) and dd < dd_threshold
+    weak_rs = not math.isnan(rs) and rs < 0
+    return below_ma and deep_dd and weak_rs
+
+
 def _would_breach_floor(portfolio: Portfolio, prices: dict[str, float],
                         sym: str, new_dec: str, floor: float) -> bool:
     """Return True if executing this sell would drop invested/equity below floor."""
@@ -273,15 +295,22 @@ def run_simulation(
     refill_external_cap = cfg.REFILL_EXTERNAL_EXPOSURE_CAP
     refill_top_k = cfg.REFILL_TOP_K
     defer_days = int(cfg.EXIT_DEFER_DAYS)
-    defer_dma_threshold = float(cfg.EXIT_DEFER_DMA_THRESHOLD)
+    defer_dd_threshold = float(cfg.EXIT_DEFER_DD_THRESHOLD)
+    defer_gap_pct = float(cfg.EXIT_DEFER_GAP_DOWN_PCT)
     fee_kw = {"slippage_bps": cfg.SLIPPAGE_BPS, "cost_bps": cfg.TRANSACTION_COST_BPS}
     core_set = set(holding_symbols)
     if candidate_symbols is None:
         candidate_symbols = list(holding_symbols)
     decision_iter = candidate_symbols
-    # D-BT25: ma200 frame for acute-breakdown test; computed on close_df so it
-    # matches phase0_strategy's own ma200 (decoupled from the decisions matrix).
-    ma200_df = close_df.rolling(cfg.MA_LONG).mean() if defer_days > 0 else None
+    # D-BT26: ma200 + drawdown frames for triple-gate acute-breakdown test. Both
+    # are derived from close_df to match phase0_strategy's rolling metrics.
+    if defer_days > 0:
+        ma200_df = close_df.rolling(cfg.MA_LONG).mean()
+        high52_df = close_df.rolling(cfg.HIGH_52W_WINDOW).max()
+        drawdown_df = close_df / high52_df - 1.0
+    else:
+        ma200_df = None
+        drawdown_df = None
     pending_exits: dict[str, int] = {}
 
     for i in range(1, len(dates)):
@@ -293,12 +322,16 @@ def run_simulation(
                  and t_prev in market_trend.index else None)
         floor_active = trend is not None and trend != "DOWNTREND"  # D-BT20: UPTREND + SIDEWAYS
 
-        # D-BT25: resolve deferred EXITs BEFORE processing today's decisions.
-        # Acute breakdown (price < ma200 * threshold) fires immediately; otherwise
-        # the timer decrements. A non-EXIT matrix signal cancels the deferral.
+        # D-BT26: resolve deferred EXITs BEFORE processing today's decisions.
+        # Triple-gate acute (price<ma200 AND dd<-10% AND rs<0) OR gap-down>3%
+        # fires immediately; otherwise the timer decrements. A non-EXIT matrix
+        # signal cancels the deferral.
         cancelled_today: set[str] = set()
         if pending_exits and ma200_df is not None:
             ma200_row = ma200_df.loc[t_prev] if t_prev in ma200_df.index else None
+            dd_row = drawdown_df.loc[t_prev] if drawdown_df is not None and t_prev in drawdown_df.index else None
+            rs_row = rank_df.loc[t_prev] if rank_df is not None and t_prev in rank_df.index else None
+            close_prev = close_df.loc[t_prev] if t_prev in close_df.index else None
             to_drop: list[str] = []
             for sym, remaining in list(pending_exits.items()):
                 matrix_dec = dec_row.get(sym) if dec_row is not None else None
@@ -311,8 +344,11 @@ def run_simulation(
                 if math.isnan(px) or px <= 0:
                     continue  # keep pending, try again tomorrow
                 ma200 = float(ma200_row.get(sym, float("nan"))) if ma200_row is not None else float("nan")
-                acute = (not math.isnan(ma200) and ma200 > 0
-                         and px < ma200 * defer_dma_threshold)
+                dd = float(dd_row.get(sym, float("nan"))) if dd_row is not None else float("nan")
+                rs = float(rs_row.get(sym, float("nan"))) if rs_row is not None else float("nan")
+                prev_close = float(close_prev.get(sym, float("nan"))) if close_prev is not None else float("nan")
+                acute = _is_acute_breakdown(px, prev_close, ma200, dd, rs,
+                                            defer_dd_threshold, defer_gap_pct)
                 remaining -= 1
                 if not acute and remaining > 0:
                     pending_exits[sym] = remaining
@@ -371,11 +407,24 @@ def run_simulation(
                 elif new_dec == "EXIT":
                     exit_reason = "EXIT"
                     if defer_days > 0 and ma200_df is not None:
-                        ma200 = float("nan")
-                        if t_prev in ma200_df.index and sym in ma200_df.columns:
-                            ma200 = float(ma200_df.at[t_prev, sym])
-                        acute_now = (not math.isnan(ma200) and ma200 > 0
-                                     and px < ma200 * defer_dma_threshold)
+                        ma200 = float(ma200_df.at[t_prev, sym]) if (
+                            t_prev in ma200_df.index and sym in ma200_df.columns
+                        ) else float("nan")
+                        dd = float(drawdown_df.at[t_prev, sym]) if (
+                            drawdown_df is not None and t_prev in drawdown_df.index
+                            and sym in drawdown_df.columns
+                        ) else float("nan")
+                        rs = float(rank_df.at[t_prev, sym]) if (
+                            rank_df is not None and t_prev in rank_df.index
+                            and sym in rank_df.columns
+                        ) else float("nan")
+                        prev_close = float(close_df.at[t_prev, sym]) if (
+                            t_prev in close_df.index and sym in close_df.columns
+                        ) else float("nan")
+                        acute_now = _is_acute_breakdown(
+                            px, prev_close, ma200, dd, rs,
+                            defer_dd_threshold, defer_gap_pct,
+                        )
                         if not acute_now:
                             pending_exits[sym] = defer_days
                             defer_log.append((t_prev, sym, "enqueue"))

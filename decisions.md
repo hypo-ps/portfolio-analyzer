@@ -567,3 +567,69 @@ rally couldn't be re-joined. Two targeted changes:
   cancellation, and DEFER_DAYS=1 boundary. A matching `_no_defer` autouse
   fixture mirrors `_zero_costs`: legacy tests keep immediate-EXIT semantics.
 
+
+### D-BT26. Refined conditional EXIT-defer: triple-gate + gap-down bypass
+- **Problem observed:** the D-BT25 acute rule (`price < 200DMA * 0.95`) was
+  crude on two fronts. (a) It treated every sub-5%-of-200DMA print as "defer",
+  leaving strong names with deep drawdowns waiting while the slide continued.
+  (b) It had no mechanism for overnight gaps, so a -4% gap-down next to a
+  still-above-ma200 close still got deferred. The sideways 2022 regression
+  (-3.4 pp alpha vs v9) was the clearest symptom: benign pullbacks that
+  stayed above ma200 rode down for 2 days before firing.
+- **Decision:** replace the single DMA-threshold with a conditional rule
+  gated on structural strength, drawdown severity, and intraday gap behavior.
+  An EXIT fires immediately (no defer) iff either:
+  1. **Gap-down bypass** — `(prev_close - open) / prev_close >
+     cfg.EXIT_DEFER_GAP_DOWN_PCT` (default 3%). Liquidity events and
+     earnings-gap breakdowns skip the timer regardless of structure.
+  2. **Strong breakdown (triple-gate)** — `price < 200DMA` AND
+     `drawdown < cfg.EXIT_DEFER_DD_THRESHOLD` (default -10%) AND `rs < 0`.
+     All three legs must be true: sustained structural failure + meaningful
+     drawdown + underperformance vs NIFTY 500. Any single-leg failure
+     falls through to the 2-day defer timer.
+- **Intent by case:**
+  - Case 1 (all three legs true) — cut losses quickly, don't hope.
+  - Case 2 (below ma200 but mild dd) — give the name 2 days to reclaim.
+  - Case 3 (rs > 0) — strong relative winner; ride out the noise.
+  - Plus an unconditional gap-down guardrail for acute events.
+- **Implementation:** `simulator._is_acute_breakdown(px, prev_close, ma200,
+  dd, rs, dd_threshold, gap_pct)` is the single predicate. NaN on any leg
+  fails that leg (protective default: missing history defers rather than
+  fires). Applied at both the enqueue moment (EXIT first emitted) and each
+  subsequent pending-exit resolution day so a gap-down mid-defer can pull
+  the trigger early.
+- **Config changes:** removed `EXIT_DEFER_DMA_THRESHOLD`. Added
+  `EXIT_DEFER_DD_THRESHOLD = -0.10` and `EXIT_DEFER_GAP_DOWN_PCT = 0.03`.
+- **Data wiring:** drawdown frame now computed inside the simulator from
+  `close_df.rolling(HIGH_52W_WINDOW).max()` alongside the existing ma200
+  frame. RS is read from the same `rank_df` already used by D-BT21 ranked
+  re-arm.
+- **Backtest results (2021-04 to 2026-04 vs v10 baseline):**
+
+  | Metric         | v9      | v10     | v11     | Δ (v11-v10) |
+  |----------------|---------|---------|---------|-------------|
+  | CAGR           | 15.52%  | 17.55%  | 18.16%  | +0.61 pp    |
+  | Sharpe         | 1.47    | 1.55    | 1.56    | +0.01       |
+  | MaxDD          | -11.44% | -17.73% | -13.57% | **+4.16 pp**|
+  | Alpha (CAGR)   | +1.46   | +3.55   | +4.16   | +0.61 pp    |
+  | Fills          | 2,385   | 2,037   | 2,120   | +4%         |
+  | fire_acute     | —       | 287     | 967     | +237%       |
+
+  Per-year alpha (percentage points): 2021 +4.16 -> -6.59 (regression);
+  2022 -0.73 -> **+5.50** (sideways year fix, +6.23 pp); 2023 +11.61 ->
+  +15.58; 2024 +11.47 -> +16.97; 2025 -5.81 -> -6.75 (vs -8.45 in v9);
+  2026 YTD -0.33 -> -1.05.
+- **Tradeoffs:** the gap-down bypass and tighter structural gate materially
+  reduce MaxDD (-17.7% -> -13.6%) and reclaim the 2022 sideways alpha at
+  the cost of 2021 drawdown-era alpha (more aggressive acute firing caught
+  the May 2021 correction earlier but missed the snap-back). Overall
+  5-year alpha is still higher and the drawdown profile is closer to v9,
+  which is the better risk-adjusted outcome.
+- **Tests:** `tests/test_backtest_simulator.py` adds 3 tests under
+  `with_defer`: gap-down bypass, triple-gate immediate fire, RS>0 forces
+  defer despite breakdown, and mild-dd defer. The old single-threshold
+  acute test is replaced by these richer scenarios.
+- **Live parity:** still deferred. When the live pipeline persists
+  `pending_exits` it should use the same helper so the acute evaluation
+  matches the backtest exactly.
+
