@@ -47,16 +47,11 @@ def _filtered_raw_signal(raw: str, metrics: StockMetrics) -> tuple[str, str]:
     return raw, ""
 
 
-def _reentry_qualifies(metrics: StockMetrics) -> bool:
-    """D-BT19 re-entry gate: price > 200DMA AND > 50DMA AND RS > 0 AND drawdown >= EXIT_GATE_DRAWDOWN.
-
-    D-BT24: drawdown check added so REENTRY cannot pick names that the hard-gate
-    is still forcing to EXIT, which previously produced a REENTRY-then-immediate-EXIT
-    loop (noise, costless churn in backtests).
+def _reentry_primary(metrics: StockMetrics) -> bool:
+    """D-BT19/D-BT24 primary gate: price > 200DMA AND > 50DMA AND RS > 0 AND
+    drawdown >= EXIT_GATE_DRAWDOWN.
     """
     if math.isnan(metrics.ma_200) or math.isnan(metrics.ma_50):
-        return False
-    if math.isnan(metrics.relative_strength):
         return False
     dd = metrics.drawdown_from_high
     if not math.isnan(dd) and dd < cfg.EXIT_GATE_DRAWDOWN:
@@ -66,6 +61,28 @@ def _reentry_qualifies(metrics: StockMetrics) -> bool:
         and metrics.price > metrics.ma_50
         and metrics.relative_strength > 0
     )
+
+
+def _reentry_fast(metrics: StockMetrics) -> bool:
+    """D-BT27 secondary gate: price > 50DMA AND RS > 0 AND rebound from recent
+    low >= REFILL_REBOUND_THRESHOLD. Bypasses the 200DMA / drawdown gates so a
+    V-shape recovery can re-engage before the long moving average catches up.
+    """
+    if math.isnan(metrics.ma_50):
+        return False
+    rebound = metrics.rebound_from_low
+    if math.isnan(rebound) or rebound < cfg.REFILL_REBOUND_THRESHOLD:
+        return False
+    return metrics.price > metrics.ma_50 and metrics.relative_strength > 0
+
+
+def _reentry_qualifies(metrics: StockMetrics) -> bool:
+    """Re-entry allowed when either the primary (D-BT19/D-BT24) or the
+    secondary fast-rebound (D-BT27) gate passes.
+    """
+    if math.isnan(metrics.relative_strength):
+        return False
+    return _reentry_primary(metrics) or _reentry_fast(metrics)
 
 
 def decide(prev_state: str, metrics: StockMetrics, raw_signal: str) -> StrategyResult:
@@ -82,10 +99,15 @@ def decide(prev_state: str, metrics: StockMetrics, raw_signal: str) -> StrategyR
         prev_state = STATE_HOLD
 
     if prev_state == STATE_EXIT:
-        if _reentry_qualifies(metrics):
+        if _reentry_primary(metrics) and not math.isnan(metrics.relative_strength):
             return StrategyResult(
                 STATE_REDUCE, raw_signal,
                 "re-entry from EXIT: price>50DMA>200DMA and RS>0",
+            )
+        if _reentry_fast(metrics) and not math.isnan(metrics.relative_strength):
+            return StrategyResult(
+                STATE_REDUCE, raw_signal,
+                "re-entry from EXIT: fast rebound (D-BT27)",
             )
         return StrategyResult(STATE_EXIT, raw_signal, "EXIT maintained (re-entry gate not met)")
 

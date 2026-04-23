@@ -75,3 +75,26 @@ def test_classify_trend_series_matches_scalar():
     assert series.iloc[-1] == classify_index_trend(close)
     # Early bars (before ma200) should be SIDEWAYS
     assert series.iloc[100] == "SIDEWAYS"
+
+
+
+def test_refill_eligibility_fast_path_admits_rebound_below_200dma():
+    # D-BT27: build a stock that spends 70 bars high, tanks to a deep drawdown
+    # (below 200DMA), then rebounds >=10% off the local low while still below
+    # 200DMA. Primary gate must reject; secondary must admit.
+    from portfolio_analyzer import config as cfg
+
+    n = 260
+    dates = _bdates(n)
+    # 200 bars at ~100 to warm up the 200DMA, 30-bar decline to 60 (dd ~-40%),
+    # then 20-bar recovery to 75 (rebound ~+25% off low of 60).
+    up = np.linspace(100.0, 105.0, 200)
+    down = np.linspace(105.0, 60.0, 40)
+    rebound = np.linspace(60.0, 75.0, 20)
+    close = np.concatenate([up, down, rebound])
+    df = pd.DataFrame({"X": close}, index=dates)
+    elig = phase0_strategy.compute_refill_eligibility(df)
+    last = elig.iloc[-1]["X"]
+    ma200 = df["X"].rolling(cfg.MA_LONG).mean().iloc[-1]
+    assert df["X"].iloc[-1] < ma200  # confirm primary 200DMA gate fails
+    assert bool(last) is True  # secondary fast path admits
