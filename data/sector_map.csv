@@ -1,0 +1,5 @@
+# Symbol -> sector. Unknown symbols default to "UNKNOWN" at runtime.
+# Fill rows as needed. Example:
+# INFY,IT
+# HDFCBANK,BANKING
+symbol,sector

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portfolio-analyzer"
+version = "0.1.0"
+description = "Deterministic portfolio analyzer (Phase 0, VCP-oriented)."
+requires-python = ">=3.10"
+dependencies = [
+    "kiteconnect>=5.0.1",
+    "yfinance>=0.2.40",
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
+    "pydantic>=2.5",
+    "click>=8.1",
+    "requests>=2.31",
+    "pyarrow>=15.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+portfolio-analyzer = "portfolio_analyzer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
