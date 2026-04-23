@@ -69,6 +69,10 @@ NSE_BHAVCOPY_TIMEOUT = 60
 NSE_EQUITY_INSTRUMENT_TYPE = "STK"
 NSE_EQUITY_SERIES = frozenset({"EQ", "BE"})
 
+NSE_CA_API_URL = "https://www.nseindia.com/api/corporates-corporateActions"
+NSE_CA_REFERER = "https://www.nseindia.com/companies-listing/corporate-filings-actions"
+NSE_CA_TIMEOUT = 60
+
 
 @dataclass(frozen=True)
 class Credentials:
