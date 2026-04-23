@@ -60,6 +60,15 @@ REFRESH_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
 
+SCANNER_DB_FILE = "scanner.db"
+NSE_BHAVCOPY_URL_TEMPLATE = (
+    "https://nsearchives.nseindia.com/content/cm/"
+    "BhavCopy_NSE_CM_0_0_0_{date}_F_0000.csv.zip"
+)
+NSE_BHAVCOPY_TIMEOUT = 60
+NSE_EQUITY_INSTRUMENT_TYPE = "STK"
+NSE_EQUITY_SERIES = frozenset({"EQ", "BE"})
+
 
 @dataclass(frozen=True)
 class Credentials:
