@@ -130,6 +130,69 @@ def per_quarter(equity: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def window_label(report: dict) -> str:
+    """Render a compact `YYYY-YYYY` label from `report['window']`."""
+    w = report.get("window", {}) or {}
+    s, e = w.get("start"), w.get("end")
+    if not s or not e:
+        return "?"
+    return f"{str(s)[:4]}-{str(e)[:4]}"
+
+
+def normalize_equity(art: BacktestArtifacts, column: str = "equity") -> pd.Series:
+    """Return `column` rebased to 1.0 indexed by trading-day offset from start.
+    Enables overlaying curves from different-length/timeframe runs on one plot."""
+    eq = art.equity
+    if eq.empty or column not in eq.columns:
+        return pd.Series(dtype="float64")
+    s = eq[column].dropna()
+    if s.empty:
+        return pd.Series(dtype="float64")
+    return pd.Series((s / s.iloc[0]).values, index=range(len(s)), dtype="float64")
+
+
+def drawdown_series(art: BacktestArtifacts, column: str = "equity") -> pd.Series:
+    """Return running drawdown of `column` indexed by trading-day offset."""
+    eq = art.equity
+    if eq.empty or column not in eq.columns:
+        return pd.Series(dtype="float64")
+    s = eq[column].dropna()
+    if s.empty:
+        return pd.Series(dtype="float64")
+    dd = (s / s.cummax() - 1.0).values
+    return pd.Series(dd, index=range(len(s)), dtype="float64")
+
+
+def compare_metrics(arts: list[BacktestArtifacts]) -> pd.DataFrame:
+    """One row per backtest with portfolio vs benchmark headline metrics.
+    Columns: label, start, end, cagr, bench_cagr, alpha, sharpe, bench_sharpe,
+    maxdd, bench_maxdd, vol, avg_expo, end_eq, fills, refills."""
+    rows = []
+    for a in arts:
+        r = a.report
+        perf = r.get("performance") or {}
+        bench = r.get("benchmark_nifty500") or {}
+        w = r.get("window", {}) or {}
+        rows.append({
+            "label": window_label(r),
+            "start": str(w.get("start", "?")),
+            "end": str(w.get("end", "?")),
+            "cagr": float(perf.get("cagr", float("nan"))),
+            "bench_cagr": float(bench.get("cagr", float("nan"))),
+            "alpha": float(perf.get("cagr", float("nan"))) - float(bench.get("cagr", float("nan"))),
+            "sharpe": float(perf.get("sharpe", float("nan"))),
+            "bench_sharpe": float(bench.get("sharpe", float("nan"))),
+            "maxdd": float(perf.get("max_drawdown", float("nan"))),
+            "bench_maxdd": float(bench.get("max_drawdown", float("nan"))),
+            "vol": float(perf.get("volatility_annual", float("nan"))),
+            "avg_expo": float(r.get("avg_exposure", float("nan"))),
+            "end_eq": float(r.get("ending_equity", float("nan"))),
+            "fills": int(r.get("num_fills", 0)),
+            "refills": int((r.get("refills") or {}).get("num_refills", 0)),
+        })
+    return pd.DataFrame(rows)
+
+
 def holdings_from_fills(fills: pd.DataFrame) -> pd.DataFrame:
     """Replay BUY/SELL fills to reconstruct end-of-window share counts plus
     rupee flow per symbol. `avg_cost` is the weighted-average BUY price across

@@ -101,3 +101,46 @@ def test_holdings_empty_when_no_fills():
     empty = loader.holdings_from_fills(pd.DataFrame())
     assert empty.empty
     assert list(empty.columns) == ["symbol", "shares", "avg_cost", "invested", "realized"]
+
+
+def test_window_label_renders_year_span():
+    r = {"window": {"start": "2021-04-22", "end": "2026-04-22"}}
+    assert loader.window_label(r) == "2021-2026"
+    assert loader.window_label({}) == "?"
+
+
+def test_normalize_equity_rebases_to_one_and_uses_offset_index(tmp_path):
+    p = _write_artifacts(tmp_path)
+    art = loader.load(p)
+    norm = loader.normalize_equity(art)
+    assert len(norm) == 260
+    assert list(norm.index)[:3] == [0, 1, 2]
+    assert abs(norm.iloc[0] - 1.0) < 1e-12
+    # equity series: 1_000_000 -> 1_000_000 + 400*259; rebased ratio matches.
+    expected_last = (1_000_000.0 + 400.0 * 259) / 1_000_000.0
+    assert abs(norm.iloc[-1] - expected_last) < 1e-9
+
+
+def test_drawdown_series_is_non_positive_and_offset_indexed(tmp_path):
+    p = _write_artifacts(tmp_path)
+    art = loader.load(p)
+    dd = loader.drawdown_series(art)
+    assert len(dd) == 260
+    assert list(dd.index)[:3] == [0, 1, 2]
+    assert (dd <= 1e-12).all()
+    # Monotonically rising equity fixture -> drawdown is flat 0.
+    assert abs(dd.min()) < 1e-12
+
+
+def test_compare_metrics_returns_row_per_run(tmp_path):
+    d1 = tmp_path / "a"; d1.mkdir()
+    d2 = tmp_path / "b"; d2.mkdir()
+    p1 = _write_artifacts(d1)
+    p2 = _write_artifacts(d2)
+    arts = [loader.load(p1), loader.load(p2)]
+    df = loader.compare_metrics(arts)
+    assert len(df) == 2
+    assert {"label", "cagr", "bench_cagr", "alpha", "sharpe", "maxdd",
+            "avg_expo", "end_eq", "fills", "refills"}.issubset(df.columns)
+    # Fixture alpha = 0.10 - 0.05 = 0.05
+    assert abs(df["alpha"].iloc[0] - 0.05) < 1e-12

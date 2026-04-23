@@ -11,8 +11,11 @@ from textual.widgets import DataTable, Static
 from textual_plotext import PlotextPlot
 
 from portfolio_analyzer.tui.loader import (
-    BacktestArtifacts, holdings_from_fills, per_quarter, per_year,
+    BacktestArtifacts, compare_metrics, drawdown_series, holdings_from_fills,
+    normalize_equity, per_quarter, per_year,
 )
+
+_COMPARE_COLORS = ["cyan", "orange", "magenta", "green", "yellow", "red", "blue", "white"]
 
 
 def _fmt_pct(x: float) -> str:
@@ -147,6 +150,45 @@ def build_refills(art: BacktestArtifacts) -> DataTable:
          for row in r.itertuples(index=False)],
     )
     return table
+
+
+def build_compare(arts: list[BacktestArtifacts]) -> Vertical:
+    """Metrics table + normalized-equity overlay + drawdown overlay across runs.
+    Normalizes to trading-day offset so different timeframes align on one plot."""
+    df = compare_metrics(arts)
+    table = DataTable(id="compare-table", zebra_stripes=True)
+    _rows_to_table(
+        table,
+        ["Window", "CAGR", "Bench", "Alpha", "Sharpe", "B.Sh", "MaxDD", "B.MDD",
+         "Vol", "AvgExp", "End Eq", "Fills", "Refills"],
+        [(r.label, _fmt_pct(r.cagr), _fmt_pct(r.bench_cagr), _fmt_pct(r.alpha),
+          _fmt_num(r.sharpe), _fmt_num(r.bench_sharpe), _fmt_pct(r.maxdd),
+          _fmt_pct(r.bench_maxdd), _fmt_pct(r.vol), _fmt_num(r.avg_expo, 3),
+          _fmt_money(r.end_eq), str(r.fills), str(r.refills))
+         for r in df.itertuples(index=False)],
+    )
+
+    eq_plot = PlotextPlot(id="compare-equity")
+    dd_plot = PlotextPlot(id="compare-dd")
+    for i, a in enumerate(arts):
+        color = _COMPARE_COLORS[i % len(_COMPARE_COLORS)]
+        label = a.report.get("window", {}).get("start", "?")[:4] + "-" + \
+                a.report.get("window", {}).get("end", "?")[:4]
+        norm = normalize_equity(a)
+        if not norm.empty:
+            eq_plot.plt.plot(list(norm.index), list(norm.values),
+                             label=label, color=color)
+        dd = drawdown_series(a)
+        if not dd.empty:
+            dd_plot.plt.plot(list(dd.index), [v * 100 for v in dd.values],
+                             label=label, color=color)
+    eq_plot.plt.title("Normalized equity (each run rebased to 1.0)")
+    eq_plot.plt.xlabel("Trading day offset")
+    eq_plot.plt.ylabel("x initial")
+    dd_plot.plt.title("Drawdown (%)")
+    dd_plot.plt.xlabel("Trading day offset")
+    dd_plot.plt.ylabel("%")
+    return Vertical(table, eq_plot, dd_plot, id="compare-body")
 
 
 def build_holdings(art: BacktestArtifacts) -> DataTable:

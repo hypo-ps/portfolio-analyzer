@@ -220,13 +220,14 @@ def backtest(start_str: str | None, end_str: str | None, years: int,
 
 
 @main.command()
-@click.option("--input", "input_path", required=True,
+@click.option("--input", "input_paths", required=True, multiple=True,
               type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="Backtest JSON report. Companion CSVs must share its stem.")
-def tui(input_path: Path) -> None:
-    """Launch an interactive TUI to explore a backtest run."""
+              help="Backtest JSON report(s). Pass --input multiple times to "
+                   "enable the Compare tab. Companion CSVs must share each stem.")
+def tui(input_paths: tuple[Path, ...]) -> None:
+    """Launch an interactive TUI to explore one or more backtest runs."""
     from portfolio_analyzer.tui.app import run_tui
-    run_tui(input_path)
+    run_tui(list(input_paths))
 
 
 if __name__ == "__main__":
