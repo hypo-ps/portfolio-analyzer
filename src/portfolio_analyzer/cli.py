@@ -391,5 +391,41 @@ def scanner_ca_rebuild(db_path: Path | None) -> None:
     sys.stdout.write(json.dumps({"adjusted_bars": n}, indent=2) + "\n")
 
 
+@scanner.command("fundamentals-ingest")
+@click.option("--symbol", "symbols", type=str, multiple=True,
+              help="Limit ingestion to one or more symbols (repeatable).")
+@click.option("--limit", type=int, default=None,
+              help="Process at most N symbols from the universe.")
+@click.option("--refresh-days", type=int, default=None,
+              help="Skip entries fetched within the last N days "
+                   "(default: config.SCREENER_REFRESH_AFTER_DAYS).")
+@click.option("--force", is_flag=True, default=False,
+              help="Re-fetch every symbol, ignoring the freshness cache.")
+@_db_option
+def scanner_fundamentals_ingest(
+    symbols: tuple[str, ...], limit: int | None, refresh_days: int | None,
+    force: bool, db_path: Path | None,
+) -> None:
+    """Fetch fundamentals from Screener.in for each symbol in stock_master."""
+    from portfolio_analyzer.scanner.fundamentals.ingest import ingest_fundamentals
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    result = ingest_fundamentals(
+        db_path=db_path,
+        only_symbols=symbols or None,
+        limit=limit,
+        refresh_after_days=refresh_days,
+        force=force,
+    )
+    payload = {
+        "processed": result.processed,
+        "ok": result.ok,
+        "not_found": result.not_found,
+        "error": result.error,
+        "skipped": result.skipped,
+    }
+    sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+
+
 if __name__ == "__main__":
     main()
