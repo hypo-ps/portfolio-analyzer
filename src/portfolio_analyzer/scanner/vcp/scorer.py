@@ -167,9 +167,11 @@ def _structure_score(t: TechnicalFeatures) -> float:
     if len(t.swing_lows) < 3:
         return 0.0
     l0, l1, l2 = [p for _, p in t.swing_lows[-3:]]
-    ok1 = l1 > l0
-    ok2 = l2 > l1
-    return (0.5 * ok1 + 0.5 * ok2)
+    base = 0.5 * (l1 > l0) + 0.5 * (l2 > l1)
+    # Shakeout: final swing undercuts the prior one but price has recovered above it.
+    if l2 < l1 and t.close > l1:
+        base += SHAKEOUT_BONUS
+    return _clamp(base)
 
 
 def _pivot_score(t: TechnicalFeatures) -> float:
@@ -205,6 +207,11 @@ def _vcp_score(t: TechnicalFeatures) -> tuple[float, dict[str, float]]:
         + 0.15 * parts["pivot"]
         + 0.10 * parts["range"]
     )
+    # Breakout pressure: tight closes = supply absorption, imminent expansion.
+    if (t.close_std_5_norm is not None
+            and t.close_std_5_norm < BREAKOUT_PRESSURE_MAX_STD):
+        score += BREAKOUT_PRESSURE_BONUS
+        parts["breakout_pressure"] = BREAKOUT_PRESSURE_BONUS
     return _clamp(score), parts
 
 
