@@ -251,6 +251,92 @@ def test_readiness_bands_asymmetric():
     assert vs._readiness_score(above) == pytest.approx(0.0)
 
 
+# ---------- state detector (D-S23) ----------
+
+def _parts(**overrides: float) -> dict[str, float]:
+    """Full sub-score dict with permissive defaults; override per test."""
+    base = {
+        "contraction": 0.7, "volatility": 0.8, "volume": 0.7,
+        "structure": 0.7, "pivot": 0.7, "range": 0.7,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_state_ready_on_coiled_tight_setup():
+    t = replace(
+        _baseline_tech(),
+        range_20d=0.06, distance_to_pivot=-0.01, close_std_5_norm=0.005,
+    )
+    assert vs._detect_state(t, 0.60, _parts(pivot=0.75)) == "READY"
+
+
+def test_state_contracting_on_valid_vcp():
+    # Fails READY (vcp too low, std too high) but passes CONTRACTING rules.
+    t = replace(
+        _baseline_tech(),
+        range_20d=0.09, distance_to_pivot=-0.03, close_std_5_norm=0.015,
+    )
+    assert vs._detect_state(t, 0.50, _parts(pivot=0.4)) == "CONTRACTING"
+
+
+def test_state_base_building_on_early_consolidation():
+    t = replace(_baseline_tech(), range_20d=0.12, distance_to_pivot=-0.05)
+    # Low volatility/volume to fail CONTRACTING; structure high enough for BASE.
+    p = _parts(contraction=0.0, volatility=0.2, volume=0.2, structure=0.5)
+    assert vs._detect_state(t, 0.35, p) == "BASE_BUILDING"
+
+
+def test_state_trend_on_strong_uptrend_no_base():
+    t = replace(
+        _baseline_tech(),
+        range_20d=0.22, return_3m=0.25, distance_to_pivot=-0.01,
+    )
+    # vcp below TREND ceiling (0.30) and no usable structure.
+    p = _parts(contraction=0.0, structure=0.2)
+    assert vs._detect_state(t, 0.20, p) == "TREND"
+
+
+def test_state_breakout_on_cross_pivot_with_volume():
+    t = replace(
+        _baseline_tech(),
+        distance_to_pivot=0.01, range_20d=0.08, range_5d_norm=0.09,
+        volume_spike=True, atr_expanding=False, distance_to_ema50=0.06,
+    )
+    assert vs._detect_state(t, 0.50, _parts()) == "BREAKOUT"
+
+
+def test_state_extended_on_post_breakout_stretch():
+    t = replace(
+        _baseline_tech(),
+        distance_to_pivot=0.08, range_20d=0.10, range_5d_norm=0.12,
+        volume_spike=True, atr_expanding=True, distance_to_ema50=0.20,
+    )
+    # EXTENDED must win over BREAKOUT because of priority ordering.
+    assert vs._detect_state(t, 0.50, _parts()) == "EXTENDED"
+
+
+def test_state_none_when_no_bucket_fits():
+    # range_20d between 0.15 and 0.22, vcp above TREND ceiling → falls through.
+    t = replace(_baseline_tech(), range_20d=0.17, return_3m=0.03)
+    assert vs._detect_state(t, 0.35, _parts(contraction=0.0)) == "NONE"
+
+
+def test_state_to_decision_mapping_is_exhaustive():
+    # Every produced state must map to a decision.
+    for state in ("TREND", "BASE_BUILDING", "CONTRACTING", "READY",
+                  "BREAKOUT", "EXTENDED", "NONE", "FAIL"):
+        assert state in vs.STATE_TO_DECISION
+    assert vs.STATE_TO_DECISION["READY"] == "BUY_ALERT"
+    assert vs.STATE_TO_DECISION["CONTRACTING"] == "WATCHLIST"
+    assert vs.STATE_TO_DECISION["BASE_BUILDING"] == "IGNORE"
+    assert vs.STATE_TO_DECISION["TREND"] == "IGNORE"
+    assert vs.STATE_TO_DECISION["NONE"] == "IGNORE"
+    assert vs.STATE_TO_DECISION["BREAKOUT"] == "SKIP"
+    assert vs.STATE_TO_DECISION["EXTENDED"] == "SKIP"
+    assert vs.STATE_TO_DECISION["FAIL"] == "REJECT"
+
+
 # ---------- decision-ladder + RS-boost gating ----------
 
 def test_rs_boost_applied_only_when_vcp_clears_gate():
