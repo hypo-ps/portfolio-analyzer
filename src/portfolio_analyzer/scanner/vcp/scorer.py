@@ -35,6 +35,21 @@ TARGET_REV_GROWTH = 0.15
 TARGET_ROE = 0.20
 TARGET_ROCE = 0.20
 
+# Fundamental sub-score weights and clamp targets (D-S25)
+FUND_W_ANNUAL = 0.60          # always available when stage-2 passes
+FUND_W_TTM = 0.20             # TTM growth (sales 0.6 + profit 0.4 blend)
+FUND_W_MARGIN = 0.10          # OPM trend (latest Q vs 4Q mean)
+FUND_W_ACCEL = 0.10           # smoothed YoY acceleration
+TARGET_TTM_GROWTH = 0.20      # 20% TTM growth → full credit
+TARGET_OPM_TREND = 0.04       # +4pp margin expansion → full credit
+TARGET_ACCEL = 0.30           # +30pp YoY acceleration → full credit
+ACCEL_NEG_PENALTY = 0.5       # halve accel credit when latest YoY is negative
+
+# State-aware fundamental multiplier (D-S25): fundamentals confirm setups near
+# entry (READY/CONTRACTING) without rescuing weak signals or chasing post-breakout.
+# EARLY_READY/BASE_BUILDING/etc. fall through to 1.0.
+STATE_FUND_MULT = {"READY": 1.10, "CONTRACTING": 1.05}
+
 # Stage-3 tuning
 ATR_COMPRESSION_TARGET = 0.7
 PIVOT_RANGE_MAX = 0.08
@@ -155,7 +170,8 @@ def _stage2_hard(f: FundamentalFeatures | None) -> list[str]:
     return fails
 
 
-def _fundamental_score(f: FundamentalFeatures) -> float:
+def _fundamental_score_annual(f: FundamentalFeatures) -> float:
+    """Annual-only rollup (growth/ROE/ROCE/D/E). Stable weight = FUND_W_ANNUAL."""
     growth = f.revenue_cagr_3y
     if growth is None:
         growth = f.revenue_growth_yoy
@@ -171,6 +187,52 @@ def _fundamental_score(f: FundamentalFeatures) -> float:
     else:
         s_dte = 1.0 - (f.debt_to_equity - 0.5) / (MAX_DTE - 0.5)
     return 0.35 * s_growth + 0.25 * s_roe + 0.20 * s_roce + 0.20 * s_dte
+
+
+def _fundamental_score(f: FundamentalFeatures) -> float:
+    """Blended 0..1 fundamental score (D-S25).
+
+    Annual rollup anchors at FUND_W_ANNUAL; TTM growth, OPM trend, and
+    smoothed acceleration each contribute only when their inputs are
+    present. Missing components reweight the remaining ones (partial
+    normalization) so IPOs and freshly-ingested names aren't penalised
+    with structural zeros.
+    """
+    s_annual = _fundamental_score_annual(f)
+    components: list[tuple[float, float]] = [(FUND_W_ANNUAL, s_annual)]
+
+    # TTM growth — blended sales (0.6) + profit (0.4). Requires either side.
+    ttm_parts: list[tuple[float, float]] = []
+    if f.ttm_sales_growth_yoy is not None:
+        ttm_parts.append((0.6, _clamp(f.ttm_sales_growth_yoy / TARGET_TTM_GROWTH)))
+    if f.ttm_profit_growth_yoy is not None:
+        ttm_parts.append((0.4, _clamp(f.ttm_profit_growth_yoy / TARGET_TTM_GROWTH)))
+    if ttm_parts:
+        w_sum = sum(w for w, _ in ttm_parts)
+        s_ttm = sum(w * v for w, v in ttm_parts) / w_sum
+        components.append((FUND_W_TTM, s_ttm))
+
+    # OPM trend — decimal delta (0.04 = +4pp). Negative trend → 0.0, not penalty.
+    if f.opm_trend is not None:
+        s_opm = _clamp(f.opm_trend / TARGET_OPM_TREND)
+        components.append((FUND_W_MARGIN, s_opm))
+
+    # Smoothed acceleration — 0.5/0.5 blend. Halve credit if latest YoY is
+    # negative (avoid rewarding bounces off a collapsing base).
+    accel_parts: list[tuple[float, float]] = []
+    if f.sales_accel_smoothed is not None:
+        accel_parts.append((0.5, _clamp(f.sales_accel_smoothed / TARGET_ACCEL)))
+    if f.profit_accel_smoothed is not None:
+        accel_parts.append((0.5, _clamp(f.profit_accel_smoothed / TARGET_ACCEL)))
+    if accel_parts:
+        w_sum = sum(w for w, _ in accel_parts)
+        s_accel = sum(w * v for w, v in accel_parts) / w_sum
+        if f.q_sales_yoy_latest is not None and f.q_sales_yoy_latest < 0:
+            s_accel *= ACCEL_NEG_PENALTY
+        components.append((FUND_W_ACCEL, s_accel))
+
+    w_total = sum(w for w, _ in components)
+    return sum(w * v for w, v in components) / w_total
 
 
 def _contraction_score(t: TechnicalFeatures) -> float:
@@ -407,6 +469,15 @@ def score_candidate(
 
     state = _detect_state(t, vcp, parts)
     decision = STATE_TO_DECISION[state]
+
+    # State-aware fundamental boost (D-S25): scale near-entry setups by
+    # fundamentals. A stock with fund=1.0 in READY gets +10%; fund=0.5 gets +5%.
+    # No boost outside READY/CONTRACTING (chasing trap + post-breakout noise).
+    state_mult = STATE_FUND_MULT.get(state, 1.0)
+    if state_mult > 1.0:
+        fund_boost = 1.0 + (state_mult - 1.0) * fund
+        final *= fund_boost
+        reasons.append(f"fund_boost={fund_boost:.3f}")
 
     reasons.append(f"state={state}")
     reasons.extend(f"{k}={v:.2f}" for k, v in parts.items())
