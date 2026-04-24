@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,13 @@ logger = logging.getLogger(__name__)
 
 BARS_LOOKBACK = 320  # enough for EMA200 + 1y return + buffer
 RS_WINDOW = cfg.RETURN_WINDOW  # Phase 0 RS uses 50 trading days
+
+# Sector-strength tuning. Applied once per scan as a multiplicative boost to
+# final_score for READY/CONTRACTING/EARLY_READY rows; weak-sector BUY_ALERTs
+# demote to WATCHLIST so alerts track leadership context.
+SECTOR_BOOST_MAX = 0.15          # final_score *= (1 + 0.15 * sector_score)
+SECTOR_DOWNGRADE_CUTOFF = 0.30   # below this, BUY_ALERT → WATCHLIST
+SECTOR_BOOST_STAGES = frozenset({"READY", "CONTRACTING", "EARLY_READY"})
 
 
 @dataclass
@@ -112,6 +120,70 @@ def _load_bars(
     return arr[:, 0], arr[:, 1], arr[:, 2], arr[:, 3], arr[:, 4]
 
 
+def _compute_sector_strength(
+    rows: list[dict[str, object]],
+) -> dict[str, float]:
+    """Return ``sector -> score in [0, 1]`` computed once per scan.
+
+    ``rows`` carries one lightweight entry per scored stock with
+    ``sector``, ``return_50d``, ``return_20d``, ``return_3m``, ``ema50``,
+    ``ema200`` and ``close``. The score blends relative-strength (sector
+    median return vs cross-universe median, weighted 0.5/0.3/0.2 for
+    50/20/63 day windows) min-max normalised across sectors with breadth
+    (fraction above EMA50 / EMA200) at 0.7 / 0.3. Stocks without a sector
+    are ignored; sectors with zero ``return_50d`` members are dropped.
+    """
+    buckets: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for r in rows:
+        if r["sector"] is None:
+            continue
+        buckets[r["sector"]].append(r)  # type: ignore[arg-type]
+
+    all_50 = [r["return_50d"] for r in rows if r["return_50d"] is not None]
+    all_20 = [r["return_20d"] for r in rows if r["return_20d"] is not None]
+    all_3m = [r["return_3m"] for r in rows if r["return_3m"] is not None]
+    idx_50 = float(np.median(all_50)) if all_50 else 0.0
+    idx_20 = float(np.median(all_20)) if all_20 else 0.0
+    idx_3m = float(np.median(all_3m)) if all_3m else 0.0
+
+    raw: dict[str, dict[str, float]] = {}
+    for sector, stocks in buckets.items():
+        r50 = [s["return_50d"] for s in stocks if s["return_50d"] is not None]
+        r20 = [s["return_20d"] for s in stocks if s["return_20d"] is not None]
+        r3m = [s["return_3m"] for s in stocks if s["return_3m"] is not None]
+        if not r50:
+            continue
+        sec_50 = float(np.median(r50))
+        sec_20 = float(np.median(r20)) if r20 else 0.0
+        sec_3m = float(np.median(r3m)) if r3m else 0.0
+        rs = (
+            0.5 * (sec_50 - idx_50)
+            + 0.3 * (sec_20 - idx_20)
+            + 0.2 * (sec_3m - idx_3m)
+        )
+        above_50 = sum(
+            1 for s in stocks
+            if s["close"] is not None and s["close"] > (s["ema50"] or 0.0)
+        )
+        above_200 = sum(
+            1 for s in stocks
+            if s["close"] is not None and s["close"] > (s["ema200"] or 0.0)
+        )
+        breadth = 0.6 * (above_50 / len(stocks)) + 0.4 * (above_200 / len(stocks))
+        raw[sector] = {"rs": rs, "breadth": breadth}
+
+    if not raw:
+        return {}
+    rs_values = [v["rs"] for v in raw.values()]
+    lo, hi = min(rs_values), max(rs_values)
+    span = hi - lo if hi != lo else 1.0
+    out: dict[str, float] = {}
+    for sector, parts in raw.items():
+        norm_rs = (parts["rs"] - lo) / span
+        out[sector] = 0.7 * norm_rs + 0.3 * parts["breadth"]
+    return out
+
+
 def scan_date(
     trade_date: dt.date,
     *,
@@ -140,6 +212,12 @@ def scan_date(
         skipped_history = 0
         by_decision: dict[str, int] = {}
 
+        # First pass: extract tech + fund + returns per stock. Scoring is
+        # deferred so we can compute sector-strength context once over the
+        # full universe before scoring any row.
+        sector_inputs: list[dict[str, object]] = []
+        candidates_temp: list[tuple] = []
+
         for idx, (isin, symbol) in enumerate(universe, start=1):
             bars = _load_bars(conn, isin, trade_date, BARS_LOOKBACK)
             if bars is None:
@@ -161,7 +239,41 @@ def scan_date(
             if ret50 is not None and bench_ret50 is not None:
                 rs_score = ret50 - bench_ret50
 
+            sector_inputs.append({
+                "sector": fund.sector if fund else None,
+                "return_50d": ret50,
+                "return_20d": tech.return_20d,
+                "return_3m": tech.return_3m,
+                "ema50": tech.ema50,
+                "ema200": tech.ema200,
+                "close": tech.close,
+            })
+            candidates_temp.append(
+                (isin, symbol, tech, fund, rs_score, ret50),
+            )
+
+            if idx % 100 == 0:
+                logger.info("vcp-scan: %d/%d processed", idx, len(universe))
+
+        sector_scores = _compute_sector_strength(sector_inputs)
+
+        # Second pass: score each candidate and apply sector context.
+        for isin, symbol, tech, fund, rs_score, ret50 in candidates_temp:
             result = score_candidate(tech, fund, rs_score=rs_score)
+            sector = fund.sector if fund else None
+            sector_score = sector_scores.get(sector) if sector else None
+
+            if sector_score is not None:
+                if result.stage in SECTOR_BOOST_STAGES:
+                    boost = 1.0 + SECTOR_BOOST_MAX * sector_score
+                    if result.final_score is not None:
+                        result.final_score *= boost
+                    result.reasons.append(f"sector_boost={boost:.3f}")
+                if (sector_score < SECTOR_DOWNGRADE_CUTOFF
+                        and result.decision == "BUY_ALERT"):
+                    result.decision = "WATCHLIST"
+                    result.reasons.append("weak_sector_downgrade")
+
             by_decision[result.decision] = by_decision.get(result.decision, 0) + 1
 
             if result.decision == "REJECT" and not store_rejects:
@@ -186,10 +298,9 @@ def scan_date(
                 "return_50d": ret50,
                 "benchmark_return_50d": bench_ret50,
                 "rs_score": rs_score,
+                "sector": sector,
+                "sector_score": sector_score,
             })
-
-            if idx % 100 == 0:
-                logger.info("vcp-scan: %d/%d processed", idx, len(universe))
 
         stored = upsert_vcp_candidates(conn, rows)
 

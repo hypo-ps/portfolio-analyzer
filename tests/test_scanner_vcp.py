@@ -932,3 +932,65 @@ def test_state_to_decision_ready_mapping_remains_buy_alert():
     # *decision* only inside score_candidate. Other code paths (dashboards,
     # back-reading vcp_candidates) can still rely on the mapping.
     assert vs.STATE_TO_DECISION["READY"] == "BUY_ALERT"
+
+
+# ---------- sector strength ----------
+
+def _sector_input(
+    sector: str | None, ret50: float, ret20: float, ret3m: float,
+    *, close: float = 100.0, ema50: float = 90.0, ema200: float = 80.0,
+) -> dict[str, object]:
+    return {
+        "sector": sector, "return_50d": ret50, "return_20d": ret20,
+        "return_3m": ret3m, "ema50": ema50, "ema200": ema200, "close": close,
+    }
+
+
+def test_compute_sector_strength_ranks_strong_sector_highest():
+    from portfolio_analyzer.scanner.vcp.scan import _compute_sector_strength
+    rows = [
+        # Strong sector: above-median returns + all above EMAs.
+        _sector_input("IT", 0.30, 0.10, 0.40, close=120, ema50=100, ema200=90),
+        _sector_input("IT", 0.25, 0.08, 0.35, close=115, ema50=100, ema200=90),
+        # Weak sector: below-median returns + below EMAs.
+        _sector_input("METAL", -0.10, -0.05, -0.15, close=70, ema50=100, ema200=90),
+        _sector_input("METAL", -0.08, -0.04, -0.12, close=75, ema50=100, ema200=90),
+        # Neutral pulls median toward zero.
+        _sector_input("FMCG", 0.05, 0.02, 0.06, close=100, ema50=95, ema200=85),
+    ]
+    scores = _compute_sector_strength(rows)
+    assert set(scores.keys()) == {"IT", "METAL", "FMCG"}
+    for v in scores.values():
+        assert 0.0 <= v <= 1.0
+    assert scores["IT"] > scores["FMCG"] > scores["METAL"]
+
+
+def test_compute_sector_strength_ignores_missing_sector():
+    from portfolio_analyzer.scanner.vcp.scan import _compute_sector_strength
+    rows = [
+        _sector_input(None, 0.10, 0.05, 0.20),
+        _sector_input("IT", 0.10, 0.05, 0.20),
+    ]
+    scores = _compute_sector_strength(rows)
+    assert list(scores.keys()) == ["IT"]
+
+
+def test_compute_sector_strength_empty_when_no_returns():
+    from portfolio_analyzer.scanner.vcp.scan import _compute_sector_strength
+    assert _compute_sector_strength([]) == {}
+    rows = [_sector_input("IT", None, None, None)]  # type: ignore[arg-type]
+    assert _compute_sector_strength(rows) == {}
+
+
+def test_scan_date_persists_sector_columns(tmp_path: Path):
+    # Even without fundamentals (sector is None), the new columns should be
+    # selectable without error.
+    db_path = tmp_path / "s.db"
+    last = _seed_scan_db(db_path)
+    scan_date(last, db_path=db_path, store_rejects=True)
+    with sdb.open_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT sector, sector_score FROM vcp_candidates"
+        ).fetchone()
+    assert row is not None
+    assert row[0] is None and row[1] is None

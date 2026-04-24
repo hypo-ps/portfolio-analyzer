@@ -245,6 +245,8 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("return_50d", "REAL"),
         ("benchmark_return_50d", "REAL"),
         ("rs_score", "REAL"),
+        ("sector", "TEXT"),
+        ("sector_score", "REAL"),
     ],
 }
 
@@ -688,6 +690,7 @@ _VCP_COLS = (
     "technical_score", "vcp_score", "fundamental_score", "readiness_score",
     "combined_score", "final_score", "decision", "stage", "reasons",
     "return_50d", "benchmark_return_50d", "rs_score",
+    "sector", "sector_score",
 )
 
 

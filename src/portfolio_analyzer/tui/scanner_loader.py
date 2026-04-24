@@ -32,6 +32,7 @@ class CandidateRow:
     return_50d: float | None
     benchmark_return_50d: float | None
     rs_score: float | None
+    sector_score: float | None
     reasons: str | None
     # Joined from fundamentals_meta (may be None if not covered)
     sector: str | None
@@ -88,7 +89,8 @@ def _load_rows(
             c.close, c.pivot, c.distance_to_pivot,
             c.technical_score, c.vcp_score, c.fundamental_score,
             c.readiness_score, c.combined_score, c.final_score,
-            c.return_50d, c.benchmark_return_50d, c.rs_score, c.reasons,
+            c.return_50d, c.benchmark_return_50d, c.rs_score,
+            c.sector_score, c.reasons,
             f.sector, f.industry, f.market_cap_cr, f.stock_pe,
             f.roe_latest, f.roce_latest
         FROM vcp_candidates c
@@ -106,9 +108,9 @@ def _load_rows(
             technical_score=r[8], vcp_score=r[9], fundamental_score=r[10],
             readiness_score=r[11], combined_score=r[12], final_score=r[13],
             return_50d=r[14], benchmark_return_50d=r[15], rs_score=r[16],
-            reasons=r[17],
-            sector=r[18], industry=r[19], market_cap_cr=r[20], stock_pe=r[21],
-            roe_latest=r[22], roce_latest=r[23],
+            sector_score=r[17], reasons=r[18],
+            sector=r[19], industry=r[20], market_cap_cr=r[21], stock_pe=r[22],
+            roe_latest=r[23], roce_latest=r[24],
         ))
     return out
 
