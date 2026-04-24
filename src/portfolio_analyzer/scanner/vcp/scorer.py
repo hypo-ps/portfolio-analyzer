@@ -200,12 +200,12 @@ def _vcp_score(t: TechnicalFeatures) -> tuple[float, dict[str, float]]:
         "range": _range_score(t),
     }
     score = (
-        0.25 * parts["contraction"]
+        0.28 * parts["contraction"]
         + 0.20 * parts["volatility"]
         + 0.15 * parts["volume"]
-        + 0.15 * parts["structure"]
+        + 0.17 * parts["structure"]
         + 0.15 * parts["pivot"]
-        + 0.10 * parts["range"]
+        + 0.05 * parts["range"]
     )
     # Breakout pressure: tight closes = supply absorption, imminent expansion.
     if (t.close_std_5_norm is not None
