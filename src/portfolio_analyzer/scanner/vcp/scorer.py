@@ -34,7 +34,8 @@ TARGET_ROCE = 0.20
 ATR_COMPRESSION_TARGET = 0.7
 PIVOT_RANGE_MAX = 0.08
 RANGE_20D_MAX = 0.20
-READINESS_BAND = 0.05          # |dist_to_pivot| <= 5% → full readiness (symmetric, pre-B4)
+READINESS_BAND_BELOW = 0.05    # |dist| <= 5% below pivot → full readiness
+READINESS_BAND_ABOVE = 0.02    # |dist| <= 2% above pivot → full readiness
 MIN_MOMENTUM_20D = 0.02        # |return_20d| floor to avoid dead-stock volatility
 MIN_PIVOT_TOUCHES = 2          # closes within 2% of pivot required for full pivot score
 BREAKOUT_PRESSURE_MAX_STD = 0.005   # std(close_5)/close below this → +0.05 VCP bonus
@@ -216,13 +217,17 @@ def _vcp_score(t: TechnicalFeatures) -> tuple[float, dict[str, float]]:
 
 
 def _readiness_score(t: TechnicalFeatures) -> float:
+    """Asymmetric: tighter band above pivot (late entries punished faster)."""
     if t.distance_to_pivot is None:
         return 0.0
-    return _clamp(1.0 - abs(t.distance_to_pivot) / READINESS_BAND)
+    d = t.distance_to_pivot
+    band = READINESS_BAND_ABOVE if d > 0 else READINESS_BAND_BELOW
+    return _clamp(1.0 - abs(d) / band)
 
 
 def score_candidate(
     t: TechnicalFeatures, f: FundamentalFeatures | None,
+    *, rs_score: float | None = None,
 ) -> ScoreBreakdown:
     """End-to-end scoring; returns decision, stage, and all sub-scores."""
     reasons: list[str] = []
@@ -244,7 +249,13 @@ def score_candidate(
     fund = _fundamental_score(f)
     vcp, parts = _vcp_score(t)
     readiness = _readiness_score(t)
-    combined = 0.7 * (0.5 * tech + 0.5 * vcp) + 0.3 * fund
+    combined = 0.5 * vcp + 0.3 * tech + 0.2 * fund
+    # RS reward-only boost: leaders get up to +20% on combined, non-leaders unchanged.
+    if rs_score is not None and rs_score > 0:
+        boost = 1.0 + RS_BOOST_MAX * min(rs_score, 1.0)
+        combined *= boost
+        reasons.append(f"rs_boost={boost:.3f}")
+    combined = _clamp(combined)
     final = combined * (0.5 + 0.5 * readiness)
 
     reasons.extend(f"{k}={v:.2f}" for k, v in parts.items())
