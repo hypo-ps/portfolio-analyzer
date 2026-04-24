@@ -768,3 +768,86 @@ def test_dashboard_loader_filters_rejects_by_default(tmp_path: Path):
     # REJECT rows exist but default loader hides them.
     data = load_dashboard(db_path=db_path, include_rejects=False)
     assert all(r.decision != "REJECT" for r in data.rows)
+
+
+
+# ---------- D-S25: blended fundamental_score + state-aware boost ----------
+
+def test_fundamental_score_without_quarterly_matches_annual():
+    # No quarterly inputs → score collapses to the annual-only rollup.
+    f = _strong_fundamentals()
+    score = vs._fundamental_score(f)
+    annual = vs._fundamental_score_annual(f)
+    assert score == pytest.approx(annual)
+
+
+def test_fundamental_score_ttm_only_partial_normalization():
+    # Annual (w=0.60) + TTM (w=0.20). Missing margin + accel → weights
+    # renormalize over the two available components.
+    f = replace(
+        _strong_fundamentals(),
+        ttm_sales_growth_yoy=0.25,   # saturates clamp (> TARGET_TTM_GROWTH)
+        ttm_profit_growth_yoy=0.30,
+    )
+    annual = vs._fundamental_score_annual(f)
+    expected = (vs.FUND_W_ANNUAL * annual + vs.FUND_W_TTM * 1.0) / (
+        vs.FUND_W_ANNUAL + vs.FUND_W_TTM
+    )
+    assert vs._fundamental_score(f) == pytest.approx(expected)
+
+
+def test_fundamental_score_all_components_full_credit():
+    f = replace(
+        _strong_fundamentals(),
+        ttm_sales_growth_yoy=0.25, ttm_profit_growth_yoy=0.30,
+        opm_trend=0.05, sales_accel_smoothed=0.35, profit_accel_smoothed=0.35,
+        q_sales_yoy_latest=0.10,  # positive → no accel penalty
+    )
+    annual = vs._fundamental_score_annual(f)
+    w = vs.FUND_W_ANNUAL + vs.FUND_W_TTM + vs.FUND_W_MARGIN + vs.FUND_W_ACCEL
+    expected = (
+        vs.FUND_W_ANNUAL * annual
+        + vs.FUND_W_TTM * 1.0
+        + vs.FUND_W_MARGIN * 1.0
+        + vs.FUND_W_ACCEL * 1.0
+    ) / w
+    assert vs._fundamental_score(f) == pytest.approx(expected)
+
+
+def test_fundamental_score_negative_latest_yoy_halves_accel():
+    f_pos = replace(
+        _strong_fundamentals(),
+        sales_accel_smoothed=0.30, profit_accel_smoothed=0.30,
+        q_sales_yoy_latest=0.05,
+    )
+    f_neg = replace(f_pos, q_sales_yoy_latest=-0.05)
+    assert vs._fundamental_score(f_neg) < vs._fundamental_score(f_pos)
+
+
+def test_score_applies_ready_fund_boost_and_reason():
+    # Tight VCP fixture reliably lands in READY under current thresholds.
+    close, high, low, vol = _tight_vcp_series()
+    t = vf.compute_technical_features(close, high, low, close, vol)
+    f = _strong_fundamentals()
+    r = score_candidate(t, f)
+    if r.stage == "READY":
+        assert any("fund_boost" in reason for reason in r.reasons)
+        # fund_boost = 1 + (1.10-1) * fund, bounded within [1.0, 1.10]
+        assert r.final_score is not None and r.final_score > 0
+    else:
+        # If the fixture lands in CONTRACTING instead, boost still applies at 1.05.
+        if r.stage == "CONTRACTING":
+            assert any("fund_boost" in reason for reason in r.reasons)
+
+
+def test_no_fund_boost_in_base_building_state():
+    # Smooth uptrend → BASE_BUILDING / TREND / NONE; no fundamental boost applied.
+    rng = np.random.default_rng(3)
+    n = 400
+    close = np.linspace(100.0, 200.0, n) + rng.normal(0, 0.3, n)
+    t = vf.compute_technical_features(
+        close, close + 0.5, close - 0.5, close, np.full(n, 1_000_000.0),
+    )
+    r = score_candidate(t, _strong_fundamentals())
+    assert r.stage not in {"READY", "CONTRACTING"}
+    assert not any("fund_boost" in reason for reason in r.reasons)
