@@ -187,15 +187,32 @@ def _volatility_score(t: TechnicalFeatures) -> float:
 
 
 def _volume_score(t: TechnicalFeatures) -> float:
+    """VCP volume score (D-S27): three explicit parts in [0, 1].
+
+    - ``slope_part``: 20-bar log-volume slope; negative slope → full score.
+    - ``dryup_part``: 20d / 50d average-volume ratio; 1.0 → 0, ≤0.70 → 1.0.
+    - ``exp_part``: within ±2% of pivot, 3-bar average vs 20d mean;
+      1.0× → 0, ≥1.5× → 1.0. Zero otherwise.
+
+    Weighted 0.40·slope + 0.40·dryup + 0.20·expansion.
+    """
     slope_part = _clamp(-(t.volume_slope_20d or 0.0) * 20.0)
-    pct_part = 0.5
-    if t.avg_volume_20d is not None and t.volume_last_50d:
-        arr = np.asarray(t.volume_last_50d, dtype=float)
-        if arr.size > 0:
-            # Fraction of 50-day daily volumes at or below the recent 20d mean.
-            pct = float(np.mean(arr <= t.avg_volume_20d))
-            pct_part = _clamp(1.0 - pct)
-    return 0.5 * slope_part + 0.5 * pct_part
+
+    dryup_part = 0.0
+    if (t.avg_volume_20d is not None and t.avg_volume_50d is not None
+            and t.avg_volume_50d > 0):
+        ratio = t.avg_volume_20d / t.avg_volume_50d
+        dryup_part = _clamp((1.0 - ratio) / 0.30)
+
+    exp_part = 0.0
+    if (t.distance_to_pivot is not None
+            and abs(t.distance_to_pivot) <= 0.02
+            and t.avg_volume_20d is not None and t.avg_volume_20d > 0
+            and len(t.volume_last_50d) >= 3):
+        recent3 = float(np.mean(np.asarray(t.volume_last_50d[-3:], dtype=float)))
+        exp_part = _clamp((recent3 / t.avg_volume_20d - 1.0) / 0.5)
+
+    return 0.4 * slope_part + 0.4 * dryup_part + 0.2 * exp_part
 
 
 def _structure_score(t: TechnicalFeatures) -> float:

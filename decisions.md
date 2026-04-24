@@ -1288,3 +1288,59 @@ rally couldn't be re-joined. Two targeted changes:
 - **Out of scope:** spacing for cross-type adjacency (swing-high next to
   swing-low), adaptive spacing based on ATR / volatility, optimal
   windowed-argmax rather than greedy NMS.
+
+
+### D-S27. VCP `_volume_score` — explicit 3-part weighted formula
+- **Decision:** Replace the two-part (slope + `pct <= avg20`) volume score
+  with a transparent weighted sum of three components, each clamped to
+  [0, 1]:
+  - `slope_part` — 20-bar log-volume slope (negative → 1.0). Unchanged.
+  - `dryup_part` — direct ratio `avg_volume_20d / avg_volume_50d`, mapped
+    so 1.00 → 0.0 and ≤0.70 → 1.0 (linear in between).
+  - `exp_part` — volume expansion near the pivot: only active when
+    `|distance_to_pivot| ≤ 0.02`. Compares the mean of the last 3 bars'
+    volume against `avg_volume_20d`; 1.0× → 0.0, ≥1.5× → 1.0. Captures
+    the "volume kicks in right at the pivot" VCP tell. Zero otherwise.
+  - Final: `0.40·slope + 0.40·dryup + 0.20·expansion`.
+- **Rationale:** the previous `pct_part` (fraction of the 50-day pool at
+  or below `avg_volume_20d`) was hard to reason about and conflated two
+  ideas — dry-up vs. distribution tail. A uniform 100k pool and a
+  100k-20d-mean produced 1.0 even though there was no structural dry-up
+  at all. The new form uses the 20d/50d ratio, which is the classical
+  volume-contraction measure. The explicit `exp_part` rewards the
+  late-stage absorption → expansion behaviour that the old score could
+  only hint at via the slope term.
+- **Threshold choices:**
+  - Dry-up band 0.70–1.00: 70% of the 50d average on a 20d window is
+    what Minervini / O'Neil-style pre-breakout bases typically show; a
+    20d==50d volume profile has no dry-up worth scoring.
+  - Expansion trigger `≥ 1.5× avg20` over 3 bars near pivot: same
+    multiplier used by `volume_spike` elsewhere in features; 3-bar
+    smoothing avoids one-day flukes. Proximity window ±2% matches the
+    `pivot_touches` band (D-S25) so pivot-adjacent logic is consistent.
+  - Weights (0.40 / 0.40 / 0.20): slope and dry-up describe the base
+    interior (equal weight); expansion is a late-stage confirmation and
+    only fires near the pivot, so it gets a smaller share but still
+    enough to lift a clean near-pivot setup by ~0.2·0.15 = 0.03 in the
+    aggregate score.
+- **Code changes (`scanner/vcp/scorer.py`):** `_volume_score` rewritten;
+  signature unchanged. Depends on existing `TechnicalFeatures` fields
+  (`avg_volume_50d`, `distance_to_pivot`, `volume_last_50d`). No feature
+  schema change.
+- **Tests (3 new, 46 in `test_scanner_vcp.py` / 276 total):**
+  - `test_volume_score_dryup_ratio_scales_linearly` — pins the dry-up
+    mapping at ratios 1.00 / 0.85 / 0.70.
+  - `test_volume_score_expansion_only_triggers_near_pivot` — same setup
+    with `distance_to_pivot=0.01` vs `-0.10` produces 0.20 vs 0.00,
+    proving the proximity gate.
+  - `test_volume_score_handles_missing_inputs` — all-None inputs score
+    0.0 without raising.
+  - Existing `test_volume_score_rewards_recent_below_50d_median` still
+    passes under the new formula.
+- **Compatibility:** `vcp_candidates.volume_score` values may shift on
+  re-scan; no schema change, so stored rows remain valid. Dashboard /
+  TUI read the aggregate `score` — effect bounded to ≤0.15 swing per
+  name.
+- **Out of scope:** volume-at-pivot absolute levels, relative-volume vs.
+  sector, turnover-ratio-based dry-up — these require additional feature
+  fields and belong to a later ADR.

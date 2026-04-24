@@ -276,6 +276,55 @@ def test_volume_score_rewards_recent_below_50d_median():
     assert score_quiet > score_loud
 
 
+def test_volume_score_dryup_ratio_scales_linearly():
+    """D-S27: 20d/50d ratio of 1.0 → 0, ≤0.70 → 1.0 for the dry-up part."""
+    # Zero slope, far from pivot, so only the dry-up part contributes.
+    base = replace(
+        _baseline_tech(),
+        volume_slope_20d=0.0, distance_to_pivot=-0.50,
+        avg_volume_50d=100_000.0,
+    )
+    no_dryup = replace(base, avg_volume_20d=100_000.0)   # ratio 1.00 → 0.0
+    mid_dryup = replace(base, avg_volume_20d=85_000.0)   # ratio 0.85 → 0.5
+    full_dryup = replace(base, avg_volume_20d=70_000.0)  # ratio 0.70 → 1.0
+    assert vs._volume_score(no_dryup) == pytest.approx(0.0)
+    assert vs._volume_score(mid_dryup) == pytest.approx(0.4 * 0.5)
+    assert vs._volume_score(full_dryup) == pytest.approx(0.4 * 1.0)
+
+
+def test_volume_score_expansion_only_triggers_near_pivot():
+    """D-S27: expansion component requires |distance_to_pivot| ≤ 0.02."""
+    # Build a tech where recent-3-bar volume is 1.5× the 20d avg, and 20d==50d
+    # so dry-up is zero. Slope is zero. Only the expansion part can fire.
+    vol = (100_000.0,) * 47 + (150_000.0, 150_000.0, 150_000.0)
+    near = replace(
+        _baseline_tech(),
+        volume_slope_20d=0.0,
+        avg_volume_20d=100_000.0, avg_volume_50d=100_000.0,
+        volume_last_50d=vol,
+        distance_to_pivot=0.01,
+    )
+    far = replace(near, distance_to_pivot=-0.10)
+    # Near-pivot: recent3/avg20 = 1.5 → exp_part = 1.0 → 0.2 weight.
+    assert vs._volume_score(near) == pytest.approx(0.2)
+    # Far from pivot: expansion suppressed, score collapses to 0.
+    assert vs._volume_score(far) == pytest.approx(0.0)
+
+
+def test_volume_score_handles_missing_inputs():
+    """D-S27: None volumes / empty history must not raise; score stays in [0,1]."""
+    t = replace(
+        _baseline_tech(),
+        volume_slope_20d=None,
+        avg_volume_20d=None, avg_volume_50d=None,
+        volume_last_50d=(),
+        distance_to_pivot=None,
+    )
+    score = vs._volume_score(t)
+    assert 0.0 <= score <= 1.0
+    assert score == pytest.approx(0.0)
+
+
 def test_pivot_score_halved_when_touches_below_threshold():
     t = _baseline_tech()
     full = vs._pivot_score(t)
