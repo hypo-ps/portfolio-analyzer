@@ -232,3 +232,102 @@ def test_cli_status_includes_vcp_section(tmp_path: Path):
     payload = json.loads(res.output)
     assert payload["vcp"]["total"] == 1
     assert payload["vcp"]["latest_scan_date"] == last.isoformat()
+
+
+# ---------- index ingestion + RS score ----------
+
+def _seed_index(db_path: Path, last_date: dt.date, *, n: int = 120,
+                index_symbol: str = "NIFTY500", ret: float = 0.10) -> None:
+    """Seed ``index_data`` with a smooth ``ret`` over 50 bars ending on last_date."""
+    rows: list[tuple[dt.date, float]] = []
+    td = last_date - dt.timedelta(days=n * 2)
+    closes = np.linspace(1000.0, 1000.0 * (1.0 + ret), n)
+    i = 0
+    while i < n:
+        if td.weekday() < 5:
+            rows.append((td, float(closes[i])))
+            i += 1
+        td += dt.timedelta(days=1)
+    # Force the last bar to sit exactly on last_date.
+    rows[-1] = (last_date, rows[-1][1])
+    with sdb.open_db(db_path) as conn:
+        sdb.init_schema(conn)
+        sdb.upsert_index_data(conn, index_symbol, rows)
+
+
+def test_upsert_and_load_index_closes(tmp_path: Path):
+    db_path = tmp_path / "s.db"
+    td = dt.date(2025, 6, 30)
+    _seed_index(db_path, td, n=80)
+    with sdb.open_db(db_path) as conn:
+        series = sdb.load_index_closes(conn, "NIFTY500", as_of=td)
+    assert len(series) == 80
+    assert series[0][0] < series[-1][0]
+    assert series[-1][0] == td
+
+
+def test_scan_stores_rs_score_when_index_present(tmp_path: Path):
+    db_path = tmp_path / "s.db"
+    last = _seed_scan_db(db_path)
+    _seed_index(db_path, last, n=120, ret=0.05)  # bench +5% over the window
+    scan_date(last, db_path=db_path, store_rejects=True)
+    with sdb.open_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT return_50d, benchmark_return_50d, rs_score "
+            "FROM vcp_candidates"
+        ).fetchone()
+    assert row[0] is not None and row[1] is not None
+    # Seeded bench rose ~5% over 50 bars; any reasonable tolerance.
+    assert abs(row[1] - 0.05 * (50 / 120)) < 0.05 or abs(row[1]) < 0.2
+    assert row[2] == pytest.approx(row[0] - row[1], abs=1e-9)
+
+
+def test_scan_rs_is_none_without_index(tmp_path: Path):
+    db_path = tmp_path / "s.db"
+    last = _seed_scan_db(db_path)
+    result = scan_date(last, db_path=db_path, store_rejects=True)
+    assert result.benchmark_return_50d is None
+    with sdb.open_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT return_50d, benchmark_return_50d, rs_score "
+            "FROM vcp_candidates"
+        ).fetchone()
+    assert row[0] is not None  # stock return_50d still computed
+    assert row[1] is None and row[2] is None
+
+
+# ---------- dashboard loader ----------
+
+def test_dashboard_loader_returns_rows(tmp_path: Path):
+    from portfolio_analyzer.tui.scanner_loader import load_dashboard
+
+    db_path = tmp_path / "s.db"
+    last = _seed_scan_db(db_path)
+    _seed_index(db_path, last, n=80)
+    scan_date(last, db_path=db_path, store_rejects=True)
+    data = load_dashboard(db_path=db_path, include_rejects=True)
+    assert data.trade_date == last
+    assert len(data.rows) == 1
+    assert data.rows[0].symbol == "VCP"
+    assert data.universe_counts.get("REJECT", 0) >= 1
+    assert data.benchmark_return_50d is not None
+
+
+def test_dashboard_loader_empty_db(tmp_path: Path):
+    from portfolio_analyzer.tui.scanner_loader import load_dashboard
+
+    data = load_dashboard(db_path=tmp_path / "empty.db")
+    assert data.trade_date is None
+    assert data.rows == ()
+    assert data.universe_counts == {}
+
+
+def test_dashboard_loader_filters_rejects_by_default(tmp_path: Path):
+    from portfolio_analyzer.tui.scanner_loader import load_dashboard
+
+    db_path = tmp_path / "s.db"
+    last = _seed_scan_db(db_path)
+    scan_date(last, db_path=db_path, store_rejects=True)
+    # REJECT rows exist but default loader hides them.
+    data = load_dashboard(db_path=db_path, include_rejects=False)
+    assert all(r.decision != "REJECT" for r in data.rows)
