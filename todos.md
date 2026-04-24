@@ -117,8 +117,12 @@ VCP detection and fundamentals remain out of scope for this slice.
       on `final_score` — ×1.10 in READY, ×1.05 in CONTRACTING, ×1.00
       elsewhere — scaled by the fundamental score. 12 targeted tests added
       (297 total passing).
-- [ ] VCP BUY_ALERT confirmation window — require a ≥1-bar breakout above
-      pivot on above-average volume before promoting READY → CONFIRMED.
+- [x] VCP BUY_ALERT confirmation gate (D-S32): split structural READY
+      from actionable BUY_ALERT — promote only when `vcp_score ≥ 0.55`,
+      `parts["pivot"] > 0.60`, and same-bar `volume_spike is True`.
+      Unmet gates demote to WATCHLIST with reason `ready_unconfirmed`.
+      `_detect_state` and `STATE_TO_DECISION` unchanged; override lives
+      in `score_candidate`. 7 targeted tests added (304 total passing).
 - [ ] VCP backtest harness: replay `scanner vcp-scan` per trade date across
       the historical window, stub-buy BUY_ALERTs, measure forward
       N-day/90-day win rate, drawdown and hit rate by stage / sector.

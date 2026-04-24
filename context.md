@@ -419,6 +419,15 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
   `BASE_BUILDING|TREND|NONE → IGNORE`, `BREAKOUT|EXTENDED → SKIP`.
   Stage-1/2 hard-fails short-circuit to `stage=FAIL`, `decision=REJECT`.
   The `stage` column now carries the 9-valued lifecycle state.
+- **BUY_ALERT confirmation gate (D-S32):** READY is a structural
+  classification; promotion to `BUY_ALERT` additionally requires
+  `vcp_score >= 0.55`, `parts["pivot"] > 0.60`, and `volume_spike is
+  True` on the last bar. Unmet gates demote the row to `WATCHLIST`
+  with reason `ready_unconfirmed` (confirmed rows carry
+  `ready_confirmed`). The `stage` label and `STATE_TO_DECISION` map
+  are unchanged — only the computed `decision` inside
+  `score_candidate` is overridden. Fund-boost (D-S31) still applies
+  on `state == "READY"` regardless of the gate's outcome.
 - `scanner/vcp/scan.py` — orchestrator: pulls last 320 adjusted bars per ISIN
   via `adjusted_market_data`, skips rows with < 252 bars of history, and
   upserts results into `vcp_candidates(isin, trade_date)`. By default only

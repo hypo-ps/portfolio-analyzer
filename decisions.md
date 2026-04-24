@@ -1664,3 +1664,110 @@ rally couldn't be re-joined. Two targeted changes:
   separate TTM-vs-annual divergence detection — those belong to
   later ADRs.
 
+### D-S32. BUY_ALERT confirmation gate on top of READY
+- **Decision:** Split the structural READY state from the actionable
+  BUY_ALERT decision. `_detect_state` continues to emit `READY` on the
+  same tightness gates (unchanged). In `score_candidate`, after state
+  detection, rows in `READY` are promoted to `BUY_ALERT` only when all
+  three confirmation gates fire:
+  - `vcp_score >= 0.55` (`BUY_ALERT_MIN_VCP`) — raised vs the READY
+    detector's 0.50 floor.
+  - `parts["pivot"] > 0.60` (`BUY_ALERT_MIN_PIVOT`) — raised vs the
+    READY detector's 0.50 floor.
+  - `t.volume_spike is True` — same-bar volume ≥ 1.5× the 20d average.
+  Unmet → `decision = "WATCHLIST"` with reason `ready_unconfirmed`.
+  Met → `decision = "BUY_ALERT"` with reason `ready_confirmed`.
+  `STATE_TO_DECISION["READY"]` is left as `BUY_ALERT` so the structural
+  map remains the identity used by dashboards / stored rows; the gate
+  overrides only the computed decision inside `score_candidate`.
+- **Rationale:** the pre-D-S32 pipeline treated READY as synonymous
+  with an entry signal. That conflated two separate concepts:
+  - READY = *structural* setup (coil formed, price at pivot, std
+    collapsed). Worth monitoring.
+  - BUY_ALERT = *actionable* trigger (coil + elevated VCP + tight
+    pivot + confirming volume). Worth entering.
+  The scan dated 2026-04-23 surfaced this directly: ONGC landed READY
+  with `vcp=0.50`, `pivot=0.45` and no volume spike, yet emitted a
+  BUY_ALERT. Pre-gate, every such marginal READY would have generated
+  an alert even when the setup lacked the trigger bar. The gate keeps
+  the alerting surface restricted to rows that actually look buyable
+  today, without losing the structural READY label (demoted rows stay
+  on the WATCHLIST and will re-evaluate on the next bar).
+- **Threshold choices:**
+  - `0.55` on vcp is 10% above the READY detector floor of 0.50; it
+    demands *demonstrated* coil quality, not just marginal qualification.
+  - `0.60` on `parts["pivot"]` maps to `pivot_range < 0.032` (8% × 0.4)
+    with full pivot retest credit — i.e. a pivot band tighter than
+    ~3.2% of price. Looser pivots are structurally valid READY setups
+    but produce poor reward-to-risk on a same-day entry.
+  - `volume_spike is True` is the existing 1.5× / 20d gate already
+    computed in `features.py`; reusing it avoids introducing a new
+    per-bar volume metric and keeps the gate deterministic from the
+    single latest bar. `None` (insufficient history) is treated as
+    *not confirmed* — never as confirmed-by-default.
+- **What this ADR deliberately does NOT change:**
+  - `_detect_state` body: unchanged. READY remains priority-ordered
+    above EARLY_READY/CONTRACTING; its thresholds (`STATE_READY_VCP`,
+    `STATE_READY_PIVOT`, `STATE_READY_RANGE_20D`, `STATE_READY_STD5`,
+    `STATE_READY_DIST_BELOW`) are unchanged.
+  - `STATE_TO_DECISION` dict: `READY → BUY_ALERT` unchanged. The
+    override lives inside `score_candidate` only.
+  - `final_score` math: confirmation affects `decision` / `reasons`
+    but not `final_score` or `combined_score`; demoted rows still
+    carry the same numeric score and sort alongside other WATCHLIST
+    rows in the dashboard.
+  - Fundamentals state-aware boost (D-S31): still applied on
+    `state == "READY"` regardless of confirmation outcome — a
+    structurally ready row with weak confirmation is still a fund-
+    worthy near-entry candidate.
+- **Rejected alternatives:**
+  - *Add `CONFIRMED` as a new state.* Would require re-plumbing every
+    downstream (dashboard, stored `stage` column, tests, state-priority
+    chain). The gate is a 3-predicate decision override and needs no
+    new state.
+  - *Tighten the existing READY detector thresholds.* Would lose the
+    structural classification for marginal setups — they'd drop to
+    CONTRACTING/EARLY_READY and be indistinguishable from earlier-
+    stage coils. Keeping READY structural + a separate actionable
+    gate preserves both signals.
+  - *Require volume_expansion_3bar instead of volume_spike.* The 3-bar
+    mean is the BREAKOUT trigger (D-S29). For READY confirmation the
+    relevant signal is the single trigger-bar spike; requiring 3-bar
+    confirmation would force waiting past the entry window.
+- **Code changes:**
+  - `scanner/vcp/scorer.py`: added module constants `BUY_ALERT_MIN_VCP`
+    and `BUY_ALERT_MIN_PIVOT`; 10-line gate in `score_candidate` after
+    state detection.
+- **Tests (7 new, `test_scanner_vcp.py`, 304 total passing):**
+  - `test_ready_confirmed_promotes_to_buy_alert` — all gates met →
+    `BUY_ALERT` + `ready_confirmed` reason.
+  - `test_ready_without_volume_spike_demotes_to_watchlist` — flip
+    `volume_spike=False` → WATCHLIST + `ready_unconfirmed`.
+  - `test_ready_with_none_volume_spike_demotes_to_watchlist` —
+    `volume_spike=None` (insufficient history) → WATCHLIST.
+  - `test_ready_with_insufficient_vcp_demotes_to_watchlist` — raise
+    `BUY_ALERT_MIN_VCP` via monkeypatch → WATCHLIST.
+  - `test_ready_with_loose_pivot_demotes_to_watchlist` — raise
+    `BUY_ALERT_MIN_PIVOT` via monkeypatch → WATCHLIST.
+  - `test_confirmation_reason_only_attached_in_ready_state` — rows
+    outside READY carry neither `ready_confirmed` nor
+    `ready_unconfirmed`.
+  - `test_state_to_decision_ready_mapping_remains_buy_alert` — the
+    structural mapping dict is untouched.
+- **Compatibility:**
+  - No schema change.
+  - Stored `vcp_candidates` rows are not re-evaluated retroactively;
+    the gate takes effect on the next `vcp-scan` run.
+  - A name previously stored as `READY → BUY_ALERT` may now appear as
+    `READY → WATCHLIST` if it lacked a trigger bar; its `stage`
+    column is unchanged.
+  - Fund-boost reasons (D-S31) and the final_score numeric remain the
+    same across the gate; only `decision` and the confirmation-reason
+    strings differ.
+- **Out of scope:** multi-bar confirmation windows (close above pivot
+  for ≥1 bar), adaptive volume-spike thresholds (e.g. 1.3× on low-
+  volume ETFs vs 2.0× on meme names), and the separate backtest
+  harness that would quantify the gate's win-rate lift — those belong
+  to later ADRs.
+
+
