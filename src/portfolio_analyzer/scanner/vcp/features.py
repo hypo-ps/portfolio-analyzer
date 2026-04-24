@@ -33,16 +33,20 @@ class TechnicalFeatures:
     atr30_trailing: float | None
     return_1y: float | None
     return_3m: float | None
+    return_20d: float | None
     high_52w: float | None
     low_52w: float | None
     distance_from_52w_high: float | None
     avg_volume_20d: float | None
     avg_volume_50d: float | None
+    volume_last_50d: tuple[float, ...]
     avg_turnover_20d_cr: float | None
     range_20d: float | None
     pivot: float | None
     pivot_range: float | None
     distance_to_pivot: float | None
+    pivot_touches: int | None
+    close_std_5_norm: float | None
     volume_slope_20d: float | None
     # Last-3 swing structure (higher-lows, contracting ranges)
     swing_highs: tuple[tuple[int, float], ...]
@@ -162,6 +166,11 @@ def compute_technical_features(
         base = float(closes[-63])
         if base > 0:
             return_3m = (close - base) / base
+    return_20d: float | None = None
+    if n >= 21:
+        base = float(closes[-21])
+        if base > 0:
+            return_20d = (close - base) / base
 
     # 52-week band
     window_52w = closes[-252:]
@@ -177,6 +186,9 @@ def compute_technical_features(
     # Volume / turnover
     avg_volume_20d = float(volumes[-20:].mean()) if n >= 20 else None
     avg_volume_50d = float(volumes[-50:].mean()) if n >= 50 else None
+    volume_last_50d: tuple[float, ...] = ()
+    if n >= 50:
+        volume_last_50d = tuple(float(v) for v in volumes[-50:])
     avg_turnover_20d_cr: float | None = None
     if n >= 20:
         turnover = closes[-20:] * volumes[-20:]
@@ -194,6 +206,7 @@ def compute_technical_features(
     pivot: float | None = None
     pivot_range: float | None = None
     distance_to_pivot: float | None = None
+    pivot_touches: int | None = None
     if n >= 10:
         pivot = float(closes[-10:].max())
         hh10 = float(highs[-10:].max())
@@ -201,6 +214,13 @@ def compute_technical_features(
         if close > 0:
             pivot_range = (hh10 - ll10) / close
             distance_to_pivot = (close - pivot) / pivot if pivot > 0 else None
+        if pivot > 0:
+            band = 0.02 * pivot
+            pivot_touches = int(np.sum(np.abs(closes[-10:] - pivot) <= band))
+
+    close_std_5_norm: float | None = None
+    if n >= 5 and close > 0:
+        close_std_5_norm = float(closes[-5:].std(ddof=0) / close)
 
     volume_slope_20d = _volume_slope(volumes)
 
@@ -220,16 +240,20 @@ def compute_technical_features(
         atr30_trailing=atr30_trailing,
         return_1y=return_1y,
         return_3m=return_3m,
+        return_20d=return_20d,
         high_52w=high_52w,
         low_52w=low_52w,
         distance_from_52w_high=distance_from_52w_high,
         avg_volume_20d=avg_volume_20d,
         avg_volume_50d=avg_volume_50d,
+        volume_last_50d=volume_last_50d,
         avg_turnover_20d_cr=avg_turnover_20d_cr,
         range_20d=range_20d,
         pivot=pivot,
         pivot_range=pivot_range,
         distance_to_pivot=distance_to_pivot,
+        pivot_touches=pivot_touches,
+        close_std_5_norm=close_std_5_norm,
         volume_slope_20d=volume_slope_20d,
         swing_highs=swing_highs,
         swing_lows=swing_lows,
