@@ -909,3 +909,57 @@ rally couldn't be re-joined. Two targeted changes:
   per-sector score normalization, and per-symbol explain CLI.
 
 
+
+## 2026-04-24 — Phase 1 scanner dashboard slice
+
+### D-S20. NIFTY 500 index ingestion + RS score in vcp_candidates
+- **Decision:** Reuse the Phase 0 RS formula (`rs = stock_ret50 -
+  bench_ret50`, `RETURN_WINDOW = 50`) inside the scanner by ingesting
+  benchmark closes into a new `index_data(index_symbol, trade_date, close)`
+  table and reading them during `vcp-scan`. Benchmark defaults to
+  `NIFTY500` (yfinance `^CRSLDX`); the same table accepts `NIFTY50`
+  (`^NSEI`) for later RS-matrix work.
+- **Rationale:** Keeps the scanner offline-consistent (no yfinance calls
+  inside the hot scan loop), uses the same numerator/denominator as the
+  Phase 0 live analyzer so RS values compare one-to-one across systems,
+  and lives entirely on adjusted series so splits/bonuses never distort
+  the 50-bar return.
+- `vcp_candidates` gains `return_50d`, `benchmark_return_50d`, `rs_score`.
+  `scan_date` now returns `benchmark_index` + `benchmark_return_50d` in
+  its `ScanResult`. If the index hasn't been ingested, all three fields
+  are `NULL` and the scan otherwise behaves identically.
+- **Schema migration strategy:** `init_schema` reads `PRAGMA table_info`
+  and adds only the missing columns (SQLite has no `IF NOT EXISTS` for
+  `ADD COLUMN`). The same mechanism is reusable for future column
+  additions via `_COLUMN_MIGRATIONS`.
+- **CLI:** `scanner index-ingest [--index NIFTY500|NIFTY50] [--days N]
+  [--db PATH]`. Defaults: `NIFTY500`, 500 calendar days (well over 1y).
+  `scanner status` gains an `indices` block with per-index bars + date
+  range.
+- **Out of scope for this slice:** per-symbol ingest of stock closes
+  from yfinance (all stock series still come from the NSE bhavcopy
+  pipeline), per-sector RS, rolling RS percentile ranks.
+
+### D-S21. Scanner dashboard — Textual, DB-backed, single-screen
+- **Decision:** New app at `tui/scanner_dash.py` launched via
+  `scanner dash`. Reads `vcp_candidates` joined with `fundamentals_meta`
+  for the latest (or `--date`) scan and renders three regions:
+  summary header, sortable candidates table, detail pane for the
+  cursored row.
+- **Framework:** Reuses the existing Textual + textual-plotext stack
+  (already a dependency for the backtest TUI). No new runtime deps.
+- **Columns (20):** Symbol, Decision, Stage, Close, Pivot, Dist%, Final,
+  VCP, Tech, Fund, Ready, RS50, Ret50, Bench50, ROE, ROCE, PE, MCap,
+  Sector. Dist%/RS50/Ret50/Bench50 are rendered signed.
+- **Default filter:** `WATCHLIST` + `BUY_ALERT` only (matches the lean
+  persistence of `vcp-scan`). Press `r` to toggle including `REJECT`
+  rows if they're in the DB (requires `vcp-scan --store-rejects`).
+- **Key bindings:** `q` quit, `s` sort by the currently-cursored column
+  (uses `DataTable.sort`), `r` toggle include-rejects and reload.
+- **Selection model:** Row cursor movement (`up`/`down`) live-updates the
+  detail Static via `.update(detail_markup(...))` — no widget removal /
+  remount, which avoided a `DuplicateIds` class of bugs seen in the
+  first iteration.
+- **Out of scope for this slice:** per-row PlotextPlot of recent OHLC,
+  sector-grouped views, in-dashboard rescan button, export-to-CSV
+  action, filter-by-sector/decision widgets.

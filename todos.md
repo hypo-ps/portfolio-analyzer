@@ -83,6 +83,14 @@ VCP detection and fundamentals remain out of scope for this slice.
       decisions. Modules: `scanner/vcp/{features,fundamentals,scorer,scan}.py`,
       `vcp_candidates` table, `scanner vcp-scan` CLI. Full-universe scan
       runs end-to-end in ~10s on ~3k ISINs.
+- [x] NIFTY 500 index ingestion + RS score — `scanner/index_ingest.py`,
+      new `index_data` table, `scanner index-ingest` CLI. `vcp_candidates`
+      carries `return_50d`, `benchmark_return_50d`, `rs_score` (same
+      formula as Phase 0 live analyzer).
+- [x] Scanner dashboard — `tui/scanner_dash.py` Textual app launched via
+      `scanner dash`. Sortable candidates table joined with
+      `fundamentals_meta` + per-row drilldown pane. Toggle include-rejects
+      at runtime (`r`); sort by cursored column (`s`).
 - [ ] VCP BUY_ALERT confirmation window — require a ≥1-bar breakout above
       pivot on above-average volume before promoting READY → CONFIRMED.
 - [ ] VCP backtest harness: replay `scanner vcp-scan` per trade date across

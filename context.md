@@ -269,6 +269,9 @@ same project rather than as a separate codebase (D-S1).
   - `vcp/fundamentals.py` — per-ISIN growth / D-E loader
   - `vcp/scorer.py` — four-stage scoring pipeline + decision ladder
   - `vcp/scan.py` — orchestrator walking `stock_master` per trade date
+  - `index_ingest.py` — NIFTY 500 / NIFTY 50 close-series ingestor (yfinance)
+- `tui/scanner_dash.py` + `scanner_loader.py` + `scanner_views.py` —
+  Textual dashboard that reads `vcp_candidates` joined with `fundamentals_meta`.
 
 ### Data source
 
@@ -302,6 +305,10 @@ portfolio-analyzer scanner fundamentals-ingest     [--symbol S]... [--limit N]
                                                    [--refresh-days D] [--force] [--db PATH]
 portfolio-analyzer scanner vcp-scan                [--date YYYY-MM-DD] [--symbol S]...
                                                    [--limit N] [--store-rejects] [--db PATH]
+portfolio-analyzer scanner index-ingest            [--index NIFTY500|NIFTY50] [--days N]
+                                                   [--db PATH]
+portfolio-analyzer scanner dash                    [--date YYYY-MM-DD] [--include-rejects]
+                                                   [--db PATH]
 portfolio-analyzer scanner status                  [--db PATH]
 ```
 
@@ -379,6 +386,37 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
 - Full-universe scan (≈3k ISINs, ~440 days of history each) completes in
   ~10s on a laptop; `scanner status` exposes a `vcp` block with
   `total`, `by_decision`, `latest_scan_date`, `latest_scan_rows`.
+
+### Index ingestion + RS score (D-S20)
+
+- `scanner/index_ingest.py` — fetches daily closes for NIFTY 500 (`^CRSLDX`)
+  or NIFTY 50 (`^NSEI`) via the shared `yf_fetch` module and upserts them
+  into `index_data(index_symbol, trade_date, close)`.
+- `vcp-scan` now loads `index_data` for NIFTY 500 and computes, per
+  candidate, `return_50d = close[-1]/close[-51] - 1` and
+  `rs_score = return_50d - bench_return_50d`, matching the Phase 0 formula
+  (`stock_analysis.compute_metrics`, `RETURN_WINDOW = 50`).
+- `vcp_candidates` carries three additional columns: `return_50d`,
+  `benchmark_return_50d`, `rs_score`. Older DBs are migrated in-place via
+  `PRAGMA table_info` + `ALTER TABLE ADD COLUMN` at `init_schema` time.
+- If NIFTY 500 hasn't been ingested, RS fields are `NULL`; the scan still
+  runs and still persists candidates.
+- `scanner status` exposes a new `indices` block with per-index bar count
+  and date range.
+
+### Scanner dashboard (D-S21)
+
+- `tui/scanner_dash.py` — Textual app launched via `scanner dash`. Reads
+  the latest (or `--date`) `vcp_candidates` row set joined with
+  `fundamentals_meta` and shows: a summary header (trade date,
+  per-decision counts, benchmark ret50), a sortable `DataTable` of
+  candidates (default `WATCHLIST` + `BUY_ALERT`), and a detail pane for
+  the cursored row (full scores, RS, fundamentals, reasons trail).
+- Columns: Symbol / Decision / Stage / Close / Pivot / Dist% / Final /
+  VCP / Tech / Fund / Ready / RS50 / Ret50 / Bench50 / ROE / ROCE / PE /
+  MCap / Sector.
+- Bindings: `q` quit, `s` sort by cursored column, `r` toggle
+  include-rejects (re-queries the DB).
 
 ### Non-goals (Phase 1)
 
