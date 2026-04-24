@@ -14,12 +14,16 @@ from pathlib import Path
 
 import numpy as np
 
+from portfolio_analyzer import config as cfg
+
 from ..db import (
     default_db_path,
     init_schema,
+    load_index_closes,
     open_db,
     upsert_vcp_candidates,
 )
+from ..index_ingest import INDEX_NIFTY500
 from .features import MIN_BARS, compute_technical_features
 from .fundamentals import load_fundamental_features
 from .scorer import score_candidate
@@ -27,6 +31,7 @@ from .scorer import score_candidate
 logger = logging.getLogger(__name__)
 
 BARS_LOOKBACK = 320  # enough for EMA200 + 1y return + buffer
+RS_WINDOW = cfg.RETURN_WINDOW  # Phase 0 RS uses 50 trading days
 
 
 @dataclass
@@ -37,6 +42,29 @@ class ScanResult:
     skipped_history: int
     by_decision: dict[str, int]
     stored: int
+    benchmark_index: str | None = None
+    benchmark_return_50d: float | None = None
+
+
+def _benchmark_return_50d(
+    conn: sqlite3.Connection, trade_date: dt.date,
+    *, index_symbol: str = INDEX_NIFTY500, window: int = RS_WINDOW,
+) -> float | None:
+    """Return the benchmark's ``window``-bar return ending on/before ``trade_date``.
+
+    Returns None if the index hasn't been ingested or has fewer than
+    ``window+1`` bars as of the scan date.
+    """
+    closes = load_index_closes(
+        conn, index_symbol, as_of=trade_date, lookback=window + 5,
+    )
+    if len(closes) < window + 1:
+        return None
+    latest = closes[-1][1]
+    base = closes[-(window + 1)][1]
+    if base <= 0:
+        return None
+    return (latest - base) / base
 
 
 def _iter_universe(
@@ -101,7 +129,12 @@ def scan_date(
     with open_db(path) as conn:
         init_schema(conn)
         universe = _iter_universe(conn, trade_date, only_symbols, limit)
-        logger.info("vcp-scan: universe=%d as_of=%s", len(universe), trade_date)
+        bench_ret50 = _benchmark_return_50d(conn, trade_date)
+        logger.info(
+            "vcp-scan: universe=%d as_of=%s bench_ret50=%s",
+            len(universe), trade_date,
+            f"{bench_ret50:+.4f}" if bench_ret50 is not None else "n/a",
+        )
 
         rows: list[dict[str, object]] = []
         skipped_history = 0
@@ -123,6 +156,16 @@ def scan_date(
 
             if result.decision == "REJECT" and not store_rejects:
                 continue
+
+            ret50: float | None = None
+            if closes.size >= RS_WINDOW + 1:
+                base = float(closes[-(RS_WINDOW + 1)])
+                if base > 0:
+                    ret50 = (float(closes[-1]) - base) / base
+            rs_score: float | None = None
+            if ret50 is not None and bench_ret50 is not None:
+                rs_score = ret50 - bench_ret50
+
             rows.append({
                 "isin": isin,
                 "trade_date": trade_date,
@@ -139,6 +182,9 @@ def scan_date(
                 "decision": result.decision,
                 "stage": result.stage,
                 "reasons": "; ".join(result.reasons) if result.reasons else None,
+                "return_50d": ret50,
+                "benchmark_return_50d": bench_ret50,
+                "rs_score": rs_score,
             })
 
             if idx % 100 == 0:
@@ -153,4 +199,6 @@ def scan_date(
         skipped_history=skipped_history,
         by_decision=by_decision,
         stored=stored,
+        benchmark_index=INDEX_NIFTY500 if bench_ret50 is not None else None,
+        benchmark_return_50d=bench_ret50,
     )
