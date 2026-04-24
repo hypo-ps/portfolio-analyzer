@@ -1061,10 +1061,11 @@ rally couldn't be re-joined. Two targeted changes:
     `distance_to_ema50 > 0.15`.
   - `BREAKOUT`: `distance_to_pivot > 0` and `range_5d_norm > range_20d`
     and `volume_spike`.
-  - `READY`: `vcp ≥ 0.55`, `−0.02 ≤ dist_to_pivot ≤ 0`, `pivot_score > 0.6`,
-    `range_20d ≤ 0.08`, `close_std_5_norm < 0.010`.
-  - `CONTRACTING`: `vcp ≥ 0.45`, `contraction > 0`, `volatility > 0.5`,
-    `volume > 0.5`, `range_20d ≤ 0.10`.
+  - `READY`: `vcp ≥ 0.50`, `−0.03 ≤ dist_to_pivot ≤ 0`, `pivot_score > 0.50`,
+    `range_20d ≤ 0.08`, `close_std_5_norm < 0.010`. (relaxed in D-S23a)
+  - `CONTRACTING`: `vcp ≥ 0.45` and ≥2 of 4 sub-conditions
+    (`contraction > 0`, `volatility > 0.40`, `volume > 0.40`,
+    `structure > 0.50`). (refactored in D-S23a)
   - `BASE_BUILDING`: `0.08 < range_20d ≤ 0.15`, `vcp ≥ 0.30`,
     `structure ≥ 0.30`.
   - `TREND`: `return_3m > 0.10`, `range_20d > 0.15`, `vcp < 0.30`.
@@ -1102,3 +1103,42 @@ rally couldn't be re-joined. Two targeted changes:
   persistence (today's state vs yesterday's), `scanner vcp-explain` CLI,
   forward-test harness. Thresholds inside `_detect_state` are hard-coded
   constants (`STATE_*`) — future tuning is a separate ADR.
+
+#### D-S23a. CONTRACTING → probabilistic; READY → slightly relaxed
+- **Decision (amendment, same day):** Replace the CONTRACTING hard AND-gate
+  with a count-of-four sub-score rule, and relax the READY gates by one
+  tier. Priority ordering, state vocabulary, and decision projection are
+  unchanged.
+- **Rationale:** First live run of D-S23 yielded 0 CONTRACTING across 2,288
+  scored names on `2026-04-23` — the conjunctive rule
+  (`contraction>0 AND volatility>0.5 AND volume>0.5 AND range_20d≤0.10`)
+  eliminated legitimate mid-base setups (JBCHEPHARM, ONGC, FEDERALBNK)
+  because one sub-dimension lagged. The spec's intent is "valid VCP
+  forming," which tolerates one weak leg. Similarly, READY at
+  `vcp≥0.55 / pivot>0.6 / dist∈[-0.02,0]` was tight enough to miss
+  everything: softening to `0.50 / 0.50 / [-0.03,0]` still demands a
+  genuinely coiled setup without over-specifying it.
+- **CONTRACTING rule (new):** gate on `vcp ≥ 0.45`; then require at least
+  `STATE_CONTRACTING_MIN_SUBS = 2` of the four sub-score conditions
+  `contraction > 0`, `volatility > 0.40`, `volume > 0.40`,
+  `structure > 0.50`. The `range_20d ≤ 0.10` constraint is dropped
+  (priority ordering still routes narrow-range setups to CONTRACTING
+  before BASE_BUILDING).
+- **READY rule (new):** `vcp ≥ 0.50` (was 0.55), `-0.03 ≤ d2p ≤ 0`
+  (was `-0.02`), `pivot_score > 0.50` (was `0.60`). `range_20d ≤ 0.08`
+  and `close_std_5_norm < 0.010` unchanged — these encode the
+  "coiled-tight" geometry and loosening them would blur into CONTRACTING.
+- **New constants:** `STATE_CONTRACTING_CONTRACTION`,
+  `STATE_CONTRACTING_STRUCTURE`, `STATE_CONTRACTING_MIN_SUBS`.
+  `STATE_CONTRACTING_RANGE_20D` removed.
+- **Observed effect on `2026-04-23` universe (2,288 scored):**
+  decisions shifted from `{0 WATCHLIST, 166 IGNORE, 2,122 REJECT}` to
+  `{8 WATCHLIST, 158 IGNORE, 2,122 REJECT}`. All 8 WATCHLIST rows are
+  `CONTRACTING`: JBCHEPHARM (vcp=0.60), ONGC (0.54), FEDERALBNK (0.54),
+  LINDEINDIA (0.50), CPSEETF (0.47), ICICIB22 (0.47), ARIES (0.46),
+  LLOYDSME (0.46). Still 0 READY — none of the top 8 pass the tight
+  `range_20d ≤ 0.08 + std5 < 0.010` geometry on this date, which is
+  correct: they are mid-base, not pre-breakout.
+- **Tests:** all 268 existing tests still pass. `test_state_contracting_on_valid_vcp`
+  remains representative (all four sub-scores hit → 4 of 4 subs); no
+  new tests added.
