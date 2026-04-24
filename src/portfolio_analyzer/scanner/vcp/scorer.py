@@ -66,6 +66,12 @@ RS_BOOST_MAX = 0.20            # combined *= (1 + 0.2 * min(rs,1)) when rs > 0
 # RS boost gate (applies to combined_score, not to state detection)
 WATCHLIST_VCP = 0.40
 
+# BUY_ALERT confirmation gate (D-S32): READY is a structural setup; promoting
+# it to an actionable BUY_ALERT additionally requires elevated vcp, a tight
+# pivot sub-score, and a same-bar volume spike. Unmet → demote to WATCHLIST.
+BUY_ALERT_MIN_VCP = 0.55
+BUY_ALERT_MIN_PIVOT = 0.60
+
 # State-machine thresholds (D-S23; CONTRACTING/READY relaxed D-S24;
 # READY further relaxed + EARLY_READY added D-S28)
 STATE_READY_VCP = 0.50
@@ -469,6 +475,19 @@ def score_candidate(
 
     state = _detect_state(t, vcp, parts)
     decision = STATE_TO_DECISION[state]
+
+    # BUY_ALERT confirmation (D-S32): state detection defines the structural
+    # setup; promotion to BUY_ALERT additionally requires an actionable
+    # trigger. READY rows that fail any gate demote to WATCHLIST so they
+    # remain visible for monitoring without firing an entry alert.
+    if state == "READY":
+        confirmed = (
+            vcp >= BUY_ALERT_MIN_VCP
+            and parts.get("pivot", 0.0) > BUY_ALERT_MIN_PIVOT
+            and t.volume_spike is True
+        )
+        decision = "BUY_ALERT" if confirmed else "WATCHLIST"
+        reasons.append("ready_confirmed" if confirmed else "ready_unconfirmed")
 
     # State-aware fundamental boost (D-S25): scale near-entry setups by
     # fundamentals. A stock with fund=1.0 in READY gets +10%; fund=0.5 gets +5%.

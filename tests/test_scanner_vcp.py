@@ -851,3 +851,84 @@ def test_no_fund_boost_in_base_building_state():
     r = score_candidate(t, _strong_fundamentals())
     assert r.stage not in {"READY", "CONTRACTING"}
     assert not any("fund_boost" in reason for reason in r.reasons)
+
+
+# ---------- BUY_ALERT confirmation gate (D-S32) ----------
+
+def _ready_tech(**overrides) -> TechnicalFeatures:
+    """READY-qualifying fixture: vcp≈0.68, pivot_part=0.75, d=0 at pivot.
+
+    Overrides let individual tests flip one gate at a time.
+    """
+    defaults = {"pivot_range": 0.02, "volume_spike": True}
+    defaults.update(overrides)
+    return replace(_baseline_tech(), **defaults)
+
+
+def test_ready_confirmed_promotes_to_buy_alert():
+    t = _ready_tech()
+    r = score_candidate(t, _strong_fundamentals())
+    assert r.stage == "READY"
+    assert r.decision == "BUY_ALERT"
+    assert "ready_confirmed" in r.reasons
+    assert "ready_unconfirmed" not in r.reasons
+
+
+def test_ready_without_volume_spike_demotes_to_watchlist():
+    t = _ready_tech(volume_spike=False)
+    r = score_candidate(t, _strong_fundamentals())
+    assert r.stage == "READY"
+    assert r.decision == "WATCHLIST"
+    assert "ready_unconfirmed" in r.reasons
+
+
+def test_ready_with_none_volume_spike_demotes_to_watchlist():
+    # ``volume_spike`` is None when avg_volume_20d is unavailable — treated
+    # as "not confirmed", never as "confirmed by default".
+    t = _ready_tech(volume_spike=None)
+    r = score_candidate(t, _strong_fundamentals())
+    assert r.stage == "READY"
+    assert r.decision == "WATCHLIST"
+    assert "ready_unconfirmed" in r.reasons
+
+
+def test_ready_with_insufficient_vcp_demotes_to_watchlist(monkeypatch):
+    # Raise the vcp gate above the fixture's vcp (~0.68) to force the
+    # vcp leg of the confirmation to fail while state detection still fires.
+    monkeypatch.setattr(vs, "BUY_ALERT_MIN_VCP", 0.95)
+    t = _ready_tech()
+    r = score_candidate(t, _strong_fundamentals())
+    assert r.stage == "READY"
+    assert r.decision == "WATCHLIST"
+    assert "ready_unconfirmed" in r.reasons
+
+
+def test_ready_with_loose_pivot_demotes_to_watchlist(monkeypatch):
+    # Raise the pivot gate above the fixture's pivot sub-score (0.75).
+    monkeypatch.setattr(vs, "BUY_ALERT_MIN_PIVOT", 0.90)
+    t = _ready_tech()
+    r = score_candidate(t, _strong_fundamentals())
+    assert r.stage == "READY"
+    assert r.decision == "WATCHLIST"
+    assert "ready_unconfirmed" in r.reasons
+
+
+def test_confirmation_reason_only_attached_in_ready_state():
+    # CONTRACTING/BASE/TREND etc. must not carry the confirmation reason
+    # regardless of vcp/pivot/volume_spike — the gate is READY-only.
+    rng = np.random.default_rng(5)
+    n = 400
+    close = np.linspace(100.0, 200.0, n) + rng.normal(0, 0.3, n)
+    t = vf.compute_technical_features(
+        close, close + 0.5, close - 0.5, close, np.full(n, 1_000_000.0),
+    )
+    r = score_candidate(t, _strong_fundamentals())
+    assert r.stage != "READY"
+    assert not any(x in r.reasons for x in ("ready_confirmed", "ready_unconfirmed"))
+
+
+def test_state_to_decision_ready_mapping_remains_buy_alert():
+    # The structural map is unchanged; the confirmation gate overrides
+    # *decision* only inside score_candidate. Other code paths (dashboards,
+    # back-reading vcp_candidates) can still rely on the mapping.
+    assert vs.STATE_TO_DECISION["READY"] == "BUY_ALERT"
