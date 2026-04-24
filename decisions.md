@@ -1474,3 +1474,66 @@ rally couldn't be re-joined. Two targeted changes:
   auction volume attribution, and weighting the 3-bar mean by body size
   (green vs. red bars) — those belong to a later ADR focused on
   absorption vs. distribution distinction.
+
+### D-S30. Tighten EXTENDED — capture post-breakout stretch earlier
+- **Decision:** Lower the two distance thresholds in the EXTENDED state
+  branch so post-breakout stretches are classified as EXTENDED (→ `SKIP`)
+  earlier:
+  - `STATE_EXTENDED_DIST`: `0.05 → 0.03` (price > 3% past pivot, was 5%).
+  - `STATE_EXTENDED_EMA50_DIST`: `0.15 → 0.10` (price > 10% above EMA50,
+    was 15%).
+  - `atr_expanding is True` requirement unchanged — still the dominant
+    qualitative gate.
+- **Rationale:** a VCP setup is typically buyable in the 2–5% band above
+  the pivot. Past ~5% the breakout has run, the entry is extended, and
+  chasing at that point produces poor risk/reward. The pre-D-S30 gates
+  (`d > 5%`, `ema50_dist > 15%`) only flagged EXTENDED after the move
+  was effectively over, which meant the dashboard would keep a stock in
+  `BREAKOUT` (→ `SKIP`, but still visible in the "breakout today" mental
+  bucket) while the price had already run 10%+ past pivot. Tightening
+  to 3% / 10% captures the stretch faster and keeps the alerting
+  surface clean of chase candidates.
+- **Threshold choices:**
+  - `3% past pivot` matches the upper edge of the Minervini / O'Neil
+    buyable range (2–5%). Beyond this the risk-to-entry ratio degrades
+    sharply; any row crossing this with expanding ATR and >10% stretch
+    from EMA50 is by definition a late-stage run, not an entry.
+  - `10% above EMA50` is the conventional "overbought relative to the
+    medium-term mean" band on swing timeframes; combined with expanding
+    ATR it signals the runaway leg. 15% was too loose and forced
+    operators to wait almost an entire additional ATR's worth of move
+    before the scanner would admit the name had extended.
+  - The two gates are `AND`-ed together (unchanged). A row that's 4%
+    past pivot but only 6% above EMA50 still passes as BREAKOUT, not
+    EXTENDED — only combined stretches flip the classification.
+- **Overlap handling:** EXTENDED sits above BREAKOUT in priority order,
+  so any row satisfying the new (stricter) EXTENDED gates would
+  otherwise have classified as BREAKOUT under D-S29. Effectively, the
+  change shifts the boundary inside the `d > 0` region: `[0, 3%]` stays
+  BREAKOUT (given ATR-expanding + ema50-stretch); `(3%, ∞)` becomes
+  EXTENDED.
+- **Code changes (`scanner/vcp/scorer.py`):** two module-level constants
+  lowered. `_detect_state` body unchanged — it already reads from these
+  constants. Decision mapping (EXTENDED → SKIP) unchanged.
+- **Tests (2 new, 55 in `test_scanner_vcp.py` / 285 total):**
+  - `test_state_extended_fires_at_tightened_pivot_distance_d_s30` —
+    `d=0.04, ema50_dist=0.12, atr_expanding=True` now classifies as
+    EXTENDED (pre-D-S30 would have been BREAKOUT).
+  - `test_state_extended_not_triggered_just_below_threshold_d_s30` —
+    `d=0.025` stays BREAKOUT (below the new 3% gate).
+  - `test_state_extended_on_post_breakout_stretch` still passes
+    unchanged (was already well above both new thresholds).
+- **Compatibility:**
+  - No schema change; affects only the computed `stage` / `decision`
+    values on post-breakout rows.
+  - Stored `vcp_candidates` rows are not re-classified retroactively;
+    the new thresholds take effect on the next `vcp-scan` run.
+  - A row previously stored as `BREAKOUT → SKIP` and now re-computed
+    as `EXTENDED → SKIP` keeps the same `decision` (both map to
+    `SKIP`), so dashboard behaviour is unaffected. Only the `stage`
+    label and reason-string narrative change.
+- **Out of scope:** adaptive distance gates tied to the name's own ATR
+  percentile, differentiating "clean breakout" vs. "gap-up breakout"
+  (which deserve different extended windows), and decaying
+  `atr_expanding` to a continuous score — those belong to later ADRs.
+

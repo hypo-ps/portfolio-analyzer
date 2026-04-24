@@ -514,6 +514,31 @@ def test_state_extended_on_post_breakout_stretch():
     assert vs._detect_state(t, 0.50, _parts()) == "EXTENDED"
 
 
+def test_state_extended_fires_at_tightened_pivot_distance_d_s30():
+    """D-S30: STATE_EXTENDED_DIST lowered from 0.05 → 0.03. A 4% run past
+    the pivot with expanding ATR and >10% EMA50 stretch must now classify
+    as EXTENDED (pre-D-S30 it would still have been BREAKOUT)."""
+    t = replace(
+        _baseline_tech(),
+        distance_to_pivot=0.04, range_20d=0.08, range_5d_norm=0.09,
+        volume_expansion_3bar=True, atr_expanding=True,
+        distance_to_ema50=0.12,
+    )
+    assert vs._detect_state(t, 0.50, _parts()) == "EXTENDED"
+
+
+def test_state_extended_not_triggered_just_below_threshold_d_s30():
+    """D-S30: 2.5% past pivot is below the new 3% EXTENDED gate, so a
+    valid BREAKOUT setup at that distance must stay BREAKOUT."""
+    t = replace(
+        _baseline_tech(),
+        distance_to_pivot=0.025, range_20d=0.08, range_5d_norm=0.09,
+        volume_expansion_3bar=True, atr_expanding=True,
+        distance_to_ema50=0.12,
+    )
+    assert vs._detect_state(t, 0.50, _parts()) == "BREAKOUT"
+
+
 def test_state_none_when_no_bucket_fits():
     # range_20d between 0.15 and 0.22, vcp above TREND ceiling → falls through.
     t = replace(_baseline_tech(), range_20d=0.17, return_3m=0.03)
