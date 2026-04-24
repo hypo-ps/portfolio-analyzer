@@ -42,12 +42,16 @@ class TechnicalFeatures:
     volume_last_50d: tuple[float, ...]
     avg_turnover_20d_cr: float | None
     range_20d: float | None
+    range_5d_norm: float | None
     pivot: float | None
     pivot_range: float | None
     distance_to_pivot: float | None
     pivot_touches: int | None
     close_std_5_norm: float | None
     volume_slope_20d: float | None
+    atr_expanding: bool | None
+    volume_spike: bool | None
+    distance_to_ema50: float | None
     # Last-3 swing structure (higher-lows, contracting ranges)
     swing_highs: tuple[tuple[int, float], ...]
     swing_lows: tuple[tuple[int, float], ...]
@@ -202,6 +206,13 @@ def compute_technical_features(
         if close > 0:
             range_20d = (hh - ll) / close
 
+    # 5-day normalized range (short-horizon tightness / expansion)
+    range_5d_norm: float | None = None
+    if n >= 5 and close > 0:
+        hh5 = float(highs[-5:].max())
+        ll5 = float(lows[-5:].min())
+        range_5d_norm = (hh5 - ll5) / close
+
     # Pivot = max close of last 10 bars
     pivot: float | None = None
     pivot_range: float | None = None
@@ -223,6 +234,21 @@ def compute_technical_features(
         close_std_5_norm = float(closes[-5:].std(ddof=0) / close)
 
     volume_slope_20d = _volume_slope(volumes)
+
+    # ATR expansion: recent 5-bar TR mean vs prior 30-bar TR mean
+    atr_expanding: bool | None = None
+    if atr5_recent is not None and atr30_trailing is not None and atr30_trailing > 0:
+        atr_expanding = bool(atr5_recent / atr30_trailing >= 1.2)
+
+    # Volume spike on the last bar vs 20d avg
+    volume_spike: bool | None = None
+    if avg_volume_20d is not None and avg_volume_20d > 0:
+        volume_spike = bool(float(volumes[-1]) >= 1.5 * avg_volume_20d)
+
+    # Distance from EMA50 (decimal, signed)
+    distance_to_ema50: float | None = None
+    if ema50 is not None and ema50 > 0:
+        distance_to_ema50 = (close - ema50) / ema50
 
     # Swing structure — last 3 highs / 3 lows
     sh_all, sl_all = _find_swings(highs, lows)
@@ -249,12 +275,16 @@ def compute_technical_features(
         volume_last_50d=volume_last_50d,
         avg_turnover_20d_cr=avg_turnover_20d_cr,
         range_20d=range_20d,
+        range_5d_norm=range_5d_norm,
         pivot=pivot,
         pivot_range=pivot_range,
         distance_to_pivot=distance_to_pivot,
         pivot_touches=pivot_touches,
         close_std_5_norm=close_std_5_norm,
         volume_slope_20d=volume_slope_20d,
+        atr_expanding=atr_expanding,
+        volume_spike=volume_spike,
+        distance_to_ema50=distance_to_ema50,
         swing_highs=swing_highs,
         swing_lows=swing_lows,
     )

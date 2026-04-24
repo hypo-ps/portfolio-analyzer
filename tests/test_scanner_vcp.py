@@ -175,9 +175,10 @@ def _baseline_tech() -> TechnicalFeatures:
         high_52w=105.0, low_52w=70.0, distance_from_52w_high=-0.05,
         avg_volume_20d=80_000.0, avg_volume_50d=100_000.0,
         volume_last_50d=tuple([100_000.0] * 50),
-        avg_turnover_20d_cr=5.0, range_20d=0.08,
+        avg_turnover_20d_cr=5.0, range_20d=0.08, range_5d_norm=0.03,
         pivot=100.0, pivot_range=0.04, distance_to_pivot=0.0,
         pivot_touches=3, close_std_5_norm=0.01, volume_slope_20d=-0.01,
+        atr_expanding=False, volume_spike=False, distance_to_ema50=0.05,
         swing_highs=((50, 115.0), (100, 110.0), (150, 105.0)),
         swing_lows=((60, 100.0), (110, 99.0), (160, 100.0)),
     )
