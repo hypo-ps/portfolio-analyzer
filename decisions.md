@@ -1537,3 +1537,130 @@ rally couldn't be re-joined. Two targeted changes:
   (which deserve different extended windows), and decaying
   `atr_expanding` to a continuous score — those belong to later ADRs.
 
+
+### D-S31. Quarterly-aware fundamental scoring with state-aware blend
+
+- **Context:** annual fundamentals lag reality by 6–12 months and smear
+  single-quarter inflections (margin expansion, demand acceleration)
+  across the full FY. Post-D-S24 we have `financials_quarterly` wired
+  in, but it wasn't being consumed by the scorer — quarterly rows sat
+  unused while the fundamental leg of `final_score` stayed anchored to
+  an annual-only rollup. On the scoring side the blend also ignored
+  the lifecycle state: a strong-fundamental name and a weak-fundamental
+  name in BREAKOUT got the same downstream treatment, which invites
+  chasing expensive post-breakout moves on fundamentals alone.
+- **Decision:** consume quarterly data as three optional sub-signals
+  (TTM growth, OPM trend, smoothed YoY acceleration) using partial
+  normalization, and apply the resulting fundamental score as a
+  state-aware multiplier on `final_score` so it only amplifies
+  near-entry setups (READY, CONTRACTING).
+- **Feature math (`scanner/vcp/fundamentals.py`):**
+  - `ttm_sales_cr` / `ttm_net_profit_cr` — sum of last 4 quarters;
+    requires all 4 values present.
+  - `ttm_sales_growth_yoy` / `ttm_profit_growth_yoy` — current TTM vs.
+    prior-TTM (quarters `[-8:-4]`); requires ≥ 8 quarters and a
+    strictly-positive prior-TTM base (prior losses → `None`, never a
+    synthetic `inf` growth number).
+  - `q_sales_yoy_latest` / `q_sales_yoy_prev` — `q[-1] vs q[-5]` and
+    `q[-2] vs q[-6]`, same positive-base guard. Used only as a gating
+    signal for the acceleration penalty.
+  - `sales_accel_smoothed` / `profit_accel_smoothed` — 2-quarter
+    smoothed YoY delta: `mean(yoy[-1], yoy[-2]) − mean(yoy[-3], yoy[-4])`.
+    Smoothing damps single-quarter low-base artefacts. Requires 8
+    quarters and four valid YoY values; any `None` aborts the signal.
+  - `opm_trend` — `opm[-1] − mean(opm[-4:])` (decimal units, e.g.
+    `0.04` = +4 percentage points); requires 4 contiguous non-`None`
+    OPM values.
+  - All features are `None` when inputs are insufficient — no
+    extrapolation, no zero-fill.
+- **Score composition (`_fundamental_score`, D-S31):** a weighted
+  average over present components:
+  - **Annual (w=0.60)** — unchanged rollup
+    (`0.35·growth + 0.25·ROE + 0.20·ROCE + 0.20·D/E`). Always present
+    when stage-2 passes.
+  - **TTM growth (w=0.20)** — `0.6·sales + 0.4·profit`, each clamped
+    by `TARGET_TTM_GROWTH = 0.20` (20% YoY → full credit). Sales-only
+    or profit-only is allowed; available side is re-weighted to 1.0.
+  - **OPM trend (w=0.10)** — `clamp(opm_trend / TARGET_OPM_TREND)`
+    with `TARGET_OPM_TREND = 0.04` (+4pp → full credit).
+  - **Acceleration (w=0.10)** — `0.5·sales + 0.5·profit`, each
+    clamped by `TARGET_ACCEL = 0.30` (+30pp YoY acceleration → full
+    credit). If `q_sales_yoy_latest < 0`, credit is halved
+    (`ACCEL_NEG_PENALTY = 0.5`) to avoid rewarding bounces off a
+    collapsing base.
+  - **Partial normalization:** missing components are dropped, not
+    zero-filled; the weights of surviving components are renormalized
+    so their score always sums to 1.0. A name with no quarterly data
+    (IPO, gap in ingestion) reduces cleanly to the annual rollup
+    instead of paying a structural penalty.
+- **State-aware blend (`score_candidate`, D-S31):** after computing
+  `final = combined · (0.5 + 0.5·readiness)`, apply:
+      `final *= 1 + (state_mult − 1) · fundamental_score`
+  with `STATE_FUND_MULT = {READY: 1.10, CONTRACTING: 1.05}` and 1.00
+  (no boost) for every other state. Rationale:
+  - READY / CONTRACTING are near-entry states — fundamentals act as
+    conviction amplifiers, not as filters or rescuers. A name with
+    `fund = 1.0` in READY gets `+10%`; `fund = 0.5` gets `+5%`;
+    `fund = 0.0` gets `+0%`. The boost scales with fundamental
+    quality and never reduces `final`.
+  - BREAKOUT / EXTENDED are explicitly excluded — rewarding strong
+    fundamentals on post-breakout names invites chase behaviour, and
+    the `decision` on those states is already `SKIP` regardless of
+    score.
+  - BASE_BUILDING / TREND / NONE are early-stage states where the
+    technical setup hasn't crystallised; amplifying them pulls
+    unready names forward in the sort order.
+- **Rejected alternatives:**
+  - *Global fundamental multiplier applied in every state.* Rewards
+    expensive post-breakout names and dilutes the signal that the
+    technical state is supposed to carry.
+  - *Hard gate on quarterly TTM growth (e.g. require > 10% YoY).*
+    Breaks for IPOs, cyclical troughs, and names that are mid-base
+    after a weak quarter — exactly the population we want to catch
+    early. Partial normalization preserves these candidates.
+  - *Unsmoothed single-quarter acceleration.* Triggers false
+    positives on low-base effects (`YoY jumps from -5% to +80%`
+    simply because prior year had a one-off write-down).
+  - *Combine TTM and accel into a single composite.* Collapses the
+    "direction vs. pace" distinction: a high-growth name with
+    decelerating pace scores the same as a moderate-growth name with
+    accelerating pace, which are very different setups.
+- **Code changes:**
+  - `scanner/vcp/fundamentals.py` — `FundamentalFeatures` extended
+    with 10 optional quarterly fields (default `None` / `0`);
+    `_quarter_yoy` + `_quarterly_features` helpers;
+    `load_fundamental_features` now also reads `financials_quarterly`
+    for the same `(source, report_type)` as annual.
+  - `scanner/vcp/scorer.py` — `_fundamental_score_annual` extracted
+    from the old `_fundamental_score`; new `_fundamental_score`
+    composes annual + quarterly components with partial
+    normalization; `score_candidate` applies `STATE_FUND_MULT` after
+    the readiness blend and records `fund_boost=` in reasons.
+- **Tests (12 new, 297 total):**
+  - 6 in `test_scanner_fundamentals.py` — `_quarterly_features`
+    coverage (7Q vs 8Q guard, compounding TTM YoY, OPM trend,
+    missing-sales handling), `_quarter_yoy` base-guards,
+    `load_fundamental_features` end-to-end roundtrip with 8 seeded
+    quarters.
+  - 6 in `test_scanner_vcp.py` — `_fundamental_score` collapses to
+    annual when quarterly absent, partial-normalization with TTM
+    only, full-credit composition math, negative-latest-YoY accel
+    penalty, `fund_boost` reason emitted in READY/CONTRACTING, no
+    boost in BASE_BUILDING / TREND / NONE.
+- **Compatibility:**
+  - No schema change. `FundamentalFeatures` new fields are
+    defaulted so existing fixtures (`_strong_fundamentals()`) keep
+    working unchanged; the 285 prior tests pass as-is.
+  - Stored `vcp_candidates` rows are not re-scored retroactively;
+    the new `fundamental_score` / `final_score` take effect on the
+    next `scanner vcp-scan` run.
+  - A name with no quarterly rows now produces the same
+    `fundamental_score` it did pre-D-S31 (annual rollup), and its
+    `final_score` differs only if it lands in READY / CONTRACTING
+    (where the state multiplier applies).
+- **Out of scope:** per-sector normalization of the fundamental score
+  (cross-sector ROE / D/E baselines differ meaningfully), cash-flow
+  quality signals (CFO / PAT ratio, working-capital days), and
+  separate TTM-vs-annual divergence detection — those belong to
+  later ADRs.
+

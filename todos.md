@@ -109,6 +109,14 @@ VCP detection and fundamentals remain out of scope for this slice.
       BREAKOUT/EXTENDED→SKIP, FAIL→REJECT. Features added: `range_5d_norm`,
       `atr_expanding`, `volume_spike`, `distance_to_ema50`. 8 state-detector
       tests added (268 total passing). Stage column repurposed in place.
+- [x] Quarterly-aware fundamental scoring (D-S31): `FundamentalFeatures`
+      extended with TTM, smoothed YoY acceleration and OPM-trend fields
+      sourced from `financials_quarterly`; `_fundamental_score` blends
+      annual (0.60) + TTM (0.20) + OPM trend (0.10) + accel (0.10) with
+      partial normalization over present components; state-aware multiplier
+      on `final_score` — ×1.10 in READY, ×1.05 in CONTRACTING, ×1.00
+      elsewhere — scaled by the fundamental score. 12 targeted tests added
+      (297 total passing).
 - [ ] VCP BUY_ALERT confirmation window — require a ≥1-bar breakout above
       pivot on above-average volume before promoting READY → CONFIRMED.
 - [ ] VCP backtest harness: replay `scanner vcp-scan` per trade date across

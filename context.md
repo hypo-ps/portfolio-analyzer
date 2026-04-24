@@ -367,15 +367,28 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
   (closes within 2% of pivot across the 40-bar window), 20-bar log-volume slope,
   and the last three 5-bar fractal swing highs / lows.
 - `scanner/vcp/fundamentals.py` — per-ISIN `FundamentalFeatures` from
-  `fundamentals_meta` + `financials_annual`: sector, market-cap, PE, ROE,
-  ROCE, YoY and 3y/5y revenue CAGR, 3y profit CAGR, D/E from the latest
-  balance-sheet row (prefers consolidated, falls back to standalone).
+  `fundamentals_meta` + `financials_annual` + `financials_quarterly`:
+  sector, market-cap, PE, ROE, ROCE, YoY and 3y/5y revenue CAGR, 3y
+  profit CAGR, D/E from the latest balance-sheet row (prefers
+  consolidated, falls back to standalone). Quarterly-derived fields
+  (D-S31): `ttm_sales_cr`, `ttm_net_profit_cr`, `ttm_sales_growth_yoy`,
+  `ttm_profit_growth_yoy`, `q_sales_yoy_latest`, `q_sales_yoy_prev`,
+  `sales_accel_smoothed`, `profit_accel_smoothed`, `opm_trend`. Each is
+  `None` when quarterly history is insufficient (≥8 quarters needed for
+  TTM-YoY and smoothed acceleration).
 - `scanner/vcp/scorer.py` — four stages:
   1. **Stage-1 hard filters:** turnover ≥ 0.5 Cr, market cap ≥ 100 Cr,
      `close > EMA50 > EMA200`, EMA50 20d-slope > 0, 1y return ≥ 20%,
      within 25% of 52w high.
   2. **Stage-2 fundamentals:** hard-reject ROE < 10% or D/E > 2.0;
-     `fundamental_score` = 0.35·growth + 0.25·ROE + 0.20·ROCE + 0.20·D/E.
+     `fundamental_score` (D-S31) blends annual (w=0.60, unchanged
+     `0.35·growth + 0.25·ROE + 0.20·ROCE + 0.20·D/E`), TTM growth
+     (w=0.20, `0.6·sales + 0.4·profit` clamped by 20% YoY), OPM trend
+     (w=0.10, clamped by +4pp), and smoothed YoY acceleration (w=0.10,
+     `0.5·sales + 0.5·profit` clamped by +30pp, halved when the latest
+     quarterly YoY is negative). Missing components are dropped and
+     surviving weights renormalized (partial normalization) so IPOs and
+     gappy ingestion reduce cleanly to the annual rollup.
   3. **Stage-3 VCP sub-scores** (weights): contraction 0.28, volatility 0.20,
      volume 0.15, structure 0.17, pivot 0.15, range 0.05 → `vcp_score ∈ [0,1]`.
      Contraction requires **both** swing transitions to tighten (partial
@@ -391,6 +404,11 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
      RS reward-only multiplier: if `rs_score > 0` and `vcp ≥ 0.40`, multiply
      `combined` by `1 + 0.2·min(rs_score, 1)` (capped at 1.2×); non-leaders
      are unchanged. `final = combined · (0.5 + 0.5·readiness)`.
+     **State-aware fundamental boost (D-S31):** after the readiness blend,
+     `final *= 1 + (state_mult − 1) · fundamental_score` with
+     `STATE_FUND_MULT = {READY: 1.10, CONTRACTING: 1.05}` and 1.00 for
+     every other state. Fundamentals amplify near-entry setups instead of
+     rescuing weak ones or chasing post-breakout stretches.
 - **Lifecycle state machine (D-S23; `EARLY_READY` added D-S28):** after
   scoring, every candidate is classified into exactly one state via
   `_detect_state()`, priority-ordered:
