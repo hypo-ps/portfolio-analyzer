@@ -47,6 +47,16 @@ def test_fiscal_year_from_header():
     assert screener._fiscal_year_from_header("") is None
 
 
+def test_period_end_from_header():
+    assert screener._period_end_from_header("Mar 2023") == "2023-03-31"
+    assert screener._period_end_from_header("Jun 2024") == "2024-06-30"
+    assert screener._period_end_from_header("Sep 2025") == "2025-09-30"
+    assert screener._period_end_from_header("Dec 2025") == "2025-12-31"
+    assert screener._period_end_from_header("TTM") is None
+    assert screener._period_end_from_header("Mar 20233m") is None
+    assert screener._period_end_from_header("") is None
+
+
 def test_parse_infy_fixture():
     html = (FIXTURES / "INFY.html").read_text()
     c = screener.parse_company("INFY", html)
@@ -62,6 +72,14 @@ def test_parse_infy_fixture():
     assert "sales_cr" in last and last["sales_cr"] > 0
     assert "net_profit_cr" in last and last["net_profit_cr"] > 0
     assert len(c.annual_ratios) >= 8
+    assert len(c.quarterly_financials) >= 8
+    periods = [r["period_end"] for r in c.quarterly_financials]
+    assert periods == sorted(periods)
+    assert len(set(periods)) == len(periods)
+    q_last = c.quarterly_financials[-1]
+    assert q_last["sales_cr"] and q_last["sales_cr"] > 0
+    assert q_last["net_profit_cr"] and q_last["net_profit_cr"] > 0
+    assert "dividend_payout_pct" not in q_last
 
 
 def test_parse_kpittech_fixture():
@@ -87,16 +105,28 @@ def test_db_roundtrip_for_parsed_company(tmp_path: Path):
         n_rat = sdb.upsert_ratios_annual(
             conn, "INE009A01021", screener.SOURCE, c.variant, c.annual_ratios,
         )
+        n_q = sdb.upsert_financials_quarterly(
+            conn, "INE009A01021", screener.SOURCE, c.variant, c.quarterly_financials,
+        )
         sdb.record_fundamentals_ingestion(
             conn, "INE009A01021", screener.SOURCE, "ok", report_type=c.variant,
         )
     assert n_fin == len(c.annual_financials)
     assert n_rat == len(c.annual_ratios)
+    assert n_q == len(c.quarterly_financials)
     with sdb.open_db(db_path) as conn:
         summary = sdb.fundamentals_summary(conn)
+        q_rows = conn.execute(
+            "SELECT period_end, sales_cr, net_profit_cr FROM financials_quarterly "
+            "WHERE isin=? ORDER BY period_end",
+            ("INE009A01021",),
+        ).fetchall()
     assert summary["companies_covered"] == 1
     assert summary["annual_rows"] == n_fin
+    assert summary["quarterly_rows"] == n_q
     assert summary["by_status"] == {"ok": 1}
+    assert [r[0] for r in q_rows] == sorted(r[0] for r in q_rows)
+    assert all(r[1] is not None and r[1] > 0 for r in q_rows)
 
 
 def test_upserts_are_idempotent(tmp_path: Path):
@@ -110,11 +140,16 @@ def test_upserts_are_idempotent(tmp_path: Path):
             sdb.upsert_financials_annual(
                 conn, "INE009A01021", screener.SOURCE, c.variant, c.annual_financials,
             )
+            sdb.upsert_financials_quarterly(
+                conn, "INE009A01021", screener.SOURCE, c.variant, c.quarterly_financials,
+            )
     with sdb.open_db(db_path) as conn:
         n = conn.execute("SELECT COUNT(*) FROM financials_annual").fetchone()[0]
         m = conn.execute("SELECT COUNT(*) FROM fundamentals_meta").fetchone()[0]
+        q = conn.execute("SELECT COUNT(*) FROM financials_quarterly").fetchone()[0]
     assert n == len(c.annual_financials)
     assert m == 1
+    assert q == len(c.quarterly_financials)
 
 
 def _fake_fetch_infy(symbol, **kwargs):
@@ -133,6 +168,7 @@ def test_ingest_fundamentals_happy_path(tmp_path: Path, mocker):
         summary = sdb.fundamentals_summary(conn)
     assert summary["companies_covered"] == 1
     assert summary["annual_rows"] > 0
+    assert summary["quarterly_rows"] > 0
 
 
 def test_ingest_fundamentals_skips_fresh(tmp_path: Path, mocker):
@@ -211,3 +247,4 @@ def test_cli_status_includes_fundamentals_section(tmp_path: Path, mocker):
     payload = json.loads(res.output)
     assert payload["fundamentals"]["companies_covered"] == 1
     assert payload["fundamentals"]["by_status"] == {"ok": 1}
+    assert payload["fundamentals"]["quarterly_rows"] > 0
