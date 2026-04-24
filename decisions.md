@@ -850,3 +850,62 @@ rally couldn't be re-joined. Two targeted changes:
   cash-flow statements, peer comparisons.
 
 
+## 2026-04-24 — Phase 1 VCP scanner engine
+
+### D-S16. VCP feature engine — adjusted OHLCV, numpy-only
+- **Decision:** `scanner/vcp/features.py` reads `adjusted_market_data` for
+  the last 320 bars per ISIN (enough for EMA200 + 1y return + buffer) and
+  returns a typed `TechnicalFeatures` row. Features: EMA50/200 with seeded
+  SMA, Wilder ATR14/50, a separate ATR5-recent vs ATR30-trailing ratio for
+  compression, 1y/3m returns, 52w band + distance, avg-volume/turnover
+  over 20d/50d, 20-bar normalized range, 10-bar close pivot with distance,
+  20-bar log-volume linear-regression slope, and the last three 5-bar
+  fractal swing highs / lows.
+- **Rationale:** All indicators run off adjusted prices so splits/bonuses
+  never trigger false breakdowns. Minimum-history gate of 252 bars keeps
+  EMA200 and 1y metrics honest.
+
+### D-S17. Four-stage scoring pipeline
+- **Decision:** `scanner/vcp/scorer.py` composes the decision via:
+  1. **Stage-1 hard filters** (liquidity + trend + strength + near-highs):
+     turnover ≥ 0.5 Cr, market cap ≥ 100 Cr, `close > EMA50 > EMA200`,
+     EMA50 20d-slope > 0, 1y return ≥ 20%, within 25% of 52w high.
+  2. **Stage-2 fundamentals**: hard-reject ROE < 10% or D/E > 2.0;
+     soft `fundamental_score = 0.35·growth + 0.25·ROE + 0.20·ROCE + 0.20·D/E`.
+  3. **Stage-3 VCP sub-scores** (`vcp_score ∈ [0,1]`, weighted):
+     contraction 0.25, volatility 0.20, volume 0.15, structure 0.15,
+     pivot 0.15, range 0.10.
+  4. **Readiness + final blend**:
+     `readiness = clamp(1 − |dist_to_pivot|/0.05)`;
+     `combined = 0.7·(0.5·tech + 0.5·vcp) + 0.3·fund`;
+     `final = combined · (0.5 + 0.5·readiness)`.
+- **Decision ladder:** `BUY_ALERT/READY` if `final ≥ 0.75` **and** within 2%
+  of pivot; `WATCHLIST/BUILDING` if `final ≥ 0.55`; `WATCHLIST/CONTRACTING`
+  if `vcp ≥ 0.40`; else `REJECT/STAGE3_FAIL`. Stage-1/2 hard-fails short-
+  circuit to `REJECT/STAGE1_FAIL | STAGE2_FAIL` and carry the failed-check
+  list in `reasons`.
+
+### D-S18. `vcp_candidates` — lean persistence, full audit on demand
+- **Decision:** Results land in `vcp_candidates(isin, trade_date)` with
+  per-row `symbol`, `close`, `pivot`, `distance_to_pivot`, all sub-scores,
+  `decision`, `stage`, and a semicolon-joined `reasons` trace. Upsert keyed
+  on `(isin, trade_date)` so a re-run on the same date is idempotent.
+- **Default storage is lean:** only `WATCHLIST` and `BUY_ALERT` rows persist.
+  `--store-rejects` keeps the full audit (useful for calibration / backtest
+  research). Two supporting indexes: `(trade_date, final_score DESC)` for
+  ranked reads, `(decision)` for filter reads.
+
+### D-S19. Scanner CLI grows a `vcp-scan` command
+- **Decision:** `scanner vcp-scan [--date YYYY-MM-DD] [--symbol S]...
+  [--limit N] [--store-rejects] [--db PATH]`. If `--date` is omitted the
+  scanner reads `MAX(trade_date)` from `market_data`. JSON summary mirrors
+  the other scanner commands (`universe`, `scored`, `skipped_history`,
+  `by_decision`, `stored`). `scanner status` now carries a `vcp` block
+  (`total`, `by_decision`, `latest_scan_date`, `latest_scan_rows`).
+- **Performance:** full-universe scan (~3k ISINs × 320 adjusted bars each)
+  completes in ~10–12s single-threaded; suitable for end-of-day cron.
+- **Out of scope for this slice:** BUY_ALERT confirmation window
+  (multi-bar breakout check), forward-test harness, win-rate calibration,
+  per-sector score normalization, and per-symbol explain CLI.
+
+

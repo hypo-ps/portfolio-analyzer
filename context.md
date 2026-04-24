@@ -265,6 +265,10 @@ same project rather than as a separate codebase (D-S1).
   - `corp_actions.py`, `ca_ingest.py` — corporate-action fetcher + orchestrator
   - `fundamentals/screener.py` — Screener.in fetcher + HTML parser
   - `fundamentals/ingest.py` — fundamentals orchestrator across `stock_master`
+  - `vcp/features.py` — technical feature engine (EMA, ATR, swings, pivot)
+  - `vcp/fundamentals.py` — per-ISIN growth / D-E loader
+  - `vcp/scorer.py` — four-stage scoring pipeline + decision ladder
+  - `vcp/scan.py` — orchestrator walking `stock_master` per trade date
 
 ### Data source
 
@@ -296,6 +300,8 @@ portfolio-analyzer scanner ca-ingest               --start YYYY-MM-DD --end YYYY
 portfolio-analyzer scanner ca-rebuild-adjustments  [--db PATH]
 portfolio-analyzer scanner fundamentals-ingest     [--symbol S]... [--limit N]
                                                    [--refresh-days D] [--force] [--db PATH]
+portfolio-analyzer scanner vcp-scan                [--date YYYY-MM-DD] [--symbol S]...
+                                                   [--limit N] [--store-rejects] [--db PATH]
 portfolio-analyzer scanner status                  [--db PATH]
 ```
 
@@ -339,11 +345,46 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
     fetched_at)` — per-symbol outcome, drives the freshness skip.
 - Money columns store rupees crore; percentages store decimals (28% → 0.28).
 
+### VCP scanner (D-S16/D-S17/D-S18/D-S19)
+
+- `scanner/vcp/features.py` — reads adjusted OHLCV and returns a
+  `TechnicalFeatures` dataclass: EMA50/200 + 20d slope, ATR14/50,
+  ATR5/ATR30 compression, 1y / 3m returns, 52w band and distance,
+  avg-volume/turnover (20d/50d), 20d normalized range, 10-bar close pivot
+  with distance, 20-bar log-volume slope, and the last three 5-bar fractal
+  swing highs / lows.
+- `scanner/vcp/fundamentals.py` — per-ISIN `FundamentalFeatures` from
+  `fundamentals_meta` + `financials_annual`: sector, market-cap, PE, ROE,
+  ROCE, YoY and 3y/5y revenue CAGR, 3y profit CAGR, D/E from the latest
+  balance-sheet row (prefers consolidated, falls back to standalone).
+- `scanner/vcp/scorer.py` — four stages:
+  1. **Stage-1 hard filters:** turnover ≥ 0.5 Cr, market cap ≥ 100 Cr,
+     `close > EMA50 > EMA200`, EMA50 20d-slope > 0, 1y return ≥ 20%,
+     within 25% of 52w high.
+  2. **Stage-2 fundamentals:** hard-reject ROE < 10% or D/E > 2.0;
+     `fundamental_score` = 0.35·growth + 0.25·ROE + 0.20·ROCE + 0.20·D/E.
+  3. **Stage-3 VCP sub-scores** (weights): contraction 0.25, volatility 0.20,
+     volume 0.15, structure 0.15, pivot 0.15, range 0.10 → `vcp_score ∈ [0,1]`.
+  4. **Readiness + final:** `readiness = 1 − |dist_to_pivot|/0.05` clamped;
+     `combined = 0.7·(0.5·tech + 0.5·vcp) + 0.3·fund`; `final = combined ·
+     (0.5 + 0.5·readiness)`.
+- **Decision ladder:** `BUY_ALERT/READY` if `final ≥ 0.75` and within 2% of
+  pivot; `WATCHLIST/BUILDING` if `final ≥ 0.55`; `WATCHLIST/CONTRACTING` if
+  `vcp ≥ 0.40`; else `REJECT/STAGE3_FAIL`. Stage-1/2 hard-fails short-circuit
+  to `REJECT/STAGE1_FAIL | STAGE2_FAIL`.
+- `scanner/vcp/scan.py` — orchestrator: pulls last 320 adjusted bars per ISIN
+  via `adjusted_market_data`, skips rows with < 252 bars of history, and
+  upserts results into `vcp_candidates(isin, trade_date)`. By default only
+  non-REJECT rows are persisted; `--store-rejects` keeps the full audit.
+- Full-universe scan (≈3k ISINs, ~440 days of history each) completes in
+  ~10s on a laptop; `scanner status` exposes a `vcp` block with
+  `total`, `by_decision`, `latest_scan_date`, `latest_scan_rows`.
+
 ### Non-goals (Phase 1)
 
 - BSE ingestion, dual-listed dedupe, SME series
 - Rights / merger / demerger price adjustments
 - Dividend-adjusted total-return series
 - Tickertape / Yahoo fundamentals fallbacks, quarterly P&L, cash flow
-- VCP feature engineering / scanner engine
+- VCP backtesting (forward-test harness and win-rate calibration)
 - Any change to the Phase 0 live analyzer or backtest contracts

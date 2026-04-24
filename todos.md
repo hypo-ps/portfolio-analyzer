@@ -77,4 +77,18 @@ VCP detection and fundamentals remain out of scope for this slice.
 - [ ] BSE corporate actions (same schema, different source).
 - [ ] Fundamentals fallback sources (Tickertape, Yahoo) for names not on
       Screener; promoter-holding / shareholding-pattern block.
-- [ ] VCP feature engineering + scanner engine.
+- [x] VCP feature engineering + scanner engine — four-stage pipeline
+      (Stage-1 hard filters, Stage-2 fundamentals, Stage-3 VCP sub-scores,
+      readiness + final blend) producing `WATCHLIST`/`BUY_ALERT`/`REJECT`
+      decisions. Modules: `scanner/vcp/{features,fundamentals,scorer,scan}.py`,
+      `vcp_candidates` table, `scanner vcp-scan` CLI. Full-universe scan
+      runs end-to-end in ~10s on ~3k ISINs.
+- [ ] VCP BUY_ALERT confirmation window — require a ≥1-bar breakout above
+      pivot on above-average volume before promoting READY → CONFIRMED.
+- [ ] VCP backtest harness: replay `scanner vcp-scan` per trade date across
+      the historical window, stub-buy BUY_ALERTs, measure forward
+      N-day/90-day win rate, drawdown and hit rate by stage / sector.
+- [ ] Per-sector normalization of fundamental_score (cross-sector ROE/D/E
+      baselines differ meaningfully).
+- [ ] `scanner vcp-explain --symbol S` — pretty-print the full reason trail
+      (stage outcomes, sub-score breakdown, pivot distance) for a single name.
