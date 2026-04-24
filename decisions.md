@@ -1033,3 +1033,72 @@ rally couldn't be re-joined. Two targeted changes:
 - **Out of scope:** per-sector VCP weight tuning, forward-test harness,
   `vcp_score` confidence interval. The scorer remains deterministic and
   single-threaded; no parameter is learned from data.
+
+
+
+## 2026-04-24 — VCP lifecycle state machine
+
+### D-S23. State-then-score: lifecycle classification drives decision
+- **Decision:** Classify every candidate into exactly one of eight lifecycle
+  states — `TREND`, `BASE_BUILDING`, `CONTRACTING`, `READY`, `BREAKOUT`,
+  `EXTENDED`, `NONE` (passed hard filters but no pattern fit), `FAIL`
+  (stage-1/2 hard fail). The state is projected to a decision via a fixed
+  map (`STATE_TO_DECISION`); the final-score ladder of D-S22 is removed.
+- **Rationale:** D-S22 fixed *which* setups score well but still scored
+  every stock on the same ladder, producing `WATCHLIST/CONTRACTING` rows
+  for stocks that had already broken out (and were therefore no longer
+  pre-breakout watch material). Decoupling **timing** (state) from
+  **quality** (vcp_score, final_score) means the dashboard's top bucket
+  only ever contains stocks in the intended lifecycle phase.
+- **New features (`TechnicalFeatures`):**
+  - `range_5d_norm` — `(max(h5) − min(l5)) / close`; needed for BREAKOUT.
+  - `atr_expanding` — `atr5_recent / atr30_trailing ≥ 1.2`; EXTENDED signal.
+  - `volume_spike` — last-bar volume `≥ 1.5 × avg_volume_20d`.
+  - `distance_to_ema50` — signed `(close − ema50) / ema50`; EXTENDED reach.
+- **State rules (priority: EXTENDED > BREAKOUT > READY > CONTRACTING >
+  BASE_BUILDING > TREND > NONE):**
+  - `EXTENDED`: `distance_to_pivot > 0.05` and `atr_expanding` and
+    `distance_to_ema50 > 0.15`.
+  - `BREAKOUT`: `distance_to_pivot > 0` and `range_5d_norm > range_20d`
+    and `volume_spike`.
+  - `READY`: `vcp ≥ 0.55`, `−0.02 ≤ dist_to_pivot ≤ 0`, `pivot_score > 0.6`,
+    `range_20d ≤ 0.08`, `close_std_5_norm < 0.010`.
+  - `CONTRACTING`: `vcp ≥ 0.45`, `contraction > 0`, `volatility > 0.5`,
+    `volume > 0.5`, `range_20d ≤ 0.10`.
+  - `BASE_BUILDING`: `0.08 < range_20d ≤ 0.15`, `vcp ≥ 0.30`,
+    `structure ≥ 0.30`.
+  - `TREND`: `return_3m > 0.10`, `range_20d > 0.15`, `vcp < 0.30`.
+  - `NONE`: anything else that passed stage-1/2.
+- **Decision projection:**
+  `READY → BUY_ALERT`, `CONTRACTING → WATCHLIST`,
+  `BASE_BUILDING | TREND | NONE → IGNORE`,
+  `BREAKOUT | EXTENDED → SKIP`, `FAIL → REJECT`.
+- **Schema:** the `stage` column carries the new 8-value vocabulary in
+  place of the old `{READY, BUILDING, CONTRACTING, STAGE1_FAIL,
+  STAGE2_FAIL, STAGE3_FAIL}`. No DDL change; values only. The `decision`
+  column now also holds `IGNORE` and `SKIP` alongside the original three.
+- **Storage:** `IGNORE` and `SKIP` rows are persisted by default (they
+  feed the `r`-toggle view in the dashboard). `REJECT` rows are still
+  opt-in via `vcp-scan --store-rejects`. `scan.py` is otherwise unchanged.
+- **RS boost:** kept as-is from D-S22 (gated on `vcp ≥ 0.40`). Since any
+  `CONTRACTING` (`vcp ≥ 0.45`) and `READY` (`vcp ≥ 0.55`) state already
+  clears that gate, the existing gate is a correct subset of the state
+  machine and no new condition is needed.
+- **Dashboard / loader:** `DASH_DECISIONS_ALL` expands to
+  `(BUY_ALERT, WATCHLIST, IGNORE, SKIP, REJECT)`; the `r` binding now
+  toggles the full set. The summary row breaks out per-decision counts
+  for all five buckets.
+- **Data wipe:** 16 stale `vcp_candidates` rows (scored under the D-S22
+  ladder) were deleted from `data/scanner.db`; next scan re-populated the
+  table under the state machine.
+- **Observed effect on `2026-04-23` universe (2,288 scored):** 0 READY,
+  0 CONTRACTING, 0 BREAKOUT, 0 EXTENDED, 166 IGNORE (BASE_BUILDING / NONE),
+  2,122 REJECT. The top `vcp_score` names (JBCHEPHARM 0.60, ONGC 0.54,
+  FEDERALBNK 0.54, LINDEINDIA 0.50) all fall into `BASE_BUILDING` or
+  `NONE` — correctly reflecting that on this date no stock is in the
+  pre-breakout sweet spot. Thresholds are intentionally tight (per spec);
+  they will relax naturally as the set of true VCPs grows.
+- **Out of scope:** per-state ranking by confidence score, state-transition
+  persistence (today's state vs yesterday's), `scanner vcp-explain` CLI,
+  forward-test harness. Thresholds inside `_detect_state` are hard-coded
+  constants (`STATE_*`) — future tuning is a separate ADR.

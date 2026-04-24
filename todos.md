@@ -98,6 +98,13 @@ VCP detection and fundamentals remain out of scope for this slice.
       readiness (5% below / 2% above pivot), reward-only RS multiplier
       (up to +20%, gated on `vcp ≥ 0.40`), hard decision gate on
       `vcp ≥ 0.40`. 10 targeted unit tests added (260 total passing).
+- [x] VCP lifecycle state machine (D-S23): 6-state classifier
+      (TREND / BASE_BUILDING / CONTRACTING / READY / BREAKOUT / EXTENDED)
+      plus NONE / FAIL; `_detect_state()` priority-ordered; decision map
+      READY→BUY_ALERT, CONTRACTING→WATCHLIST, BASE/TREND/NONE→IGNORE,
+      BREAKOUT/EXTENDED→SKIP, FAIL→REJECT. Features added: `range_5d_norm`,
+      `atr_expanding`, `volume_spike`, `distance_to_ema50`. 8 state-detector
+      tests added (268 total passing). Stage column repurposed in place.
 - [ ] VCP BUY_ALERT confirmation window — require a ≥1-bar breakout above
       pivot on above-average volume before promoting READY → CONFIRMED.
 - [ ] VCP backtest harness: replay `scanner vcp-scan` per trade date across

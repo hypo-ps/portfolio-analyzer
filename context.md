@@ -386,11 +386,14 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
      RS reward-only multiplier: if `rs_score > 0` and `vcp ≥ 0.40`, multiply
      `combined` by `1 + 0.2·min(rs_score, 1)` (capped at 1.2×); non-leaders
      are unchanged. `final = combined · (0.5 + 0.5·readiness)`.
-- **Decision ladder (gated on `vcp ≥ 0.40`):** without the VCP gate the
-  decision is `REJECT/STAGE3_FAIL` regardless of tech/fund/RS.
-  If gated: `BUY_ALERT/READY` when `final ≥ 0.75` and within 2% of pivot;
-  `WATCHLIST/BUILDING` when `final ≥ 0.55`; else `WATCHLIST/CONTRACTING`.
-  Stage-1/2 hard-fails short-circuit to `REJECT/STAGE1_FAIL | STAGE2_FAIL`.
+- **Lifecycle state machine (D-S23):** after scoring, every candidate is
+  classified into exactly one state via `_detect_state()`, priority-ordered:
+  `EXTENDED > BREAKOUT > READY > CONTRACTING > BASE_BUILDING > TREND > NONE`.
+  The state is mapped to a decision via `STATE_TO_DECISION`:
+  `READY → BUY_ALERT`, `CONTRACTING → WATCHLIST`,
+  `BASE_BUILDING|TREND|NONE → IGNORE`, `BREAKOUT|EXTENDED → SKIP`.
+  Stage-1/2 hard-fails short-circuit to `stage=FAIL`, `decision=REJECT`.
+  The `stage` column now carries the 8-valued lifecycle state.
 - `scanner/vcp/scan.py` — orchestrator: pulls last 320 adjusted bars per ISIN
   via `adjusted_market_data`, skips rows with < 252 bars of history, and
   upserts results into `vcp_candidates(isin, trade_date)`. By default only
@@ -430,7 +433,9 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
   VCP / Tech / Fund / Ready / RS50 / Ret50 / Bench50 / ROE / ROCE / PE /
   MCap / Sector.
 - Bindings: `q` quit, `s` sort by cursored column, `r` toggle
-  include-rejects (re-queries the DB).
+  include-all (IGNORE/SKIP/REJECT) — re-queries the DB. Default view shows
+  `BUY_ALERT` + `WATCHLIST`; the summary row also breaks out IGNORE/SKIP
+  counts alongside BUY_ALERT/WATCHLIST/REJECT.
 
 ### Non-goals (Phase 1)
 
