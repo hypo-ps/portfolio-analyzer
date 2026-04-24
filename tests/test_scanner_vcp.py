@@ -119,7 +119,7 @@ def test_score_reject_downtrend():
     t = vf.compute_technical_features(close, high, low, close, vol)
     r = score_candidate(t, None)
     assert r.decision == "REJECT"
-    assert r.stage == "STAGE1_FAIL"
+    assert r.stage == "FAIL"
 
 
 def test_score_stage2_fail_on_missing_fundamentals():
@@ -127,7 +127,7 @@ def test_score_stage2_fail_on_missing_fundamentals():
     t = vf.compute_technical_features(close, high, low, close, vol)
     r = score_candidate(t, None)
     assert r.decision == "REJECT"
-    assert r.stage == "STAGE2_FAIL"
+    assert r.stage == "FAIL"
 
 
 def test_score_stage2_fail_on_high_debt():
@@ -138,7 +138,7 @@ def test_score_stage2_fail_on_high_debt():
     )
     r = score_candidate(t, bad)
     assert r.decision == "REJECT"
-    assert r.stage == "STAGE2_FAIL"
+    assert r.stage == "FAIL"
     assert any("debt_to_equity" in reason for reason in r.reasons)
 
 
@@ -159,9 +159,11 @@ def test_score_watchlist_for_noisy_uptrend():
         close, close + 0.5, close - 0.5, close, np.full(n, 1_000_000.0),
     )
     r = score_candidate(t, _strong_fundamentals())
-    assert r.decision in {"WATCHLIST", "REJECT"}
+    # Noisy series should not hit BUY_ALERT; typical outcomes are IGNORE/SKIP
+    # (no clean contraction) or WATCHLIST if structure happens to align.
+    assert r.decision in {"WATCHLIST", "IGNORE", "SKIP"}
     if r.decision == "WATCHLIST":
-        assert r.stage in {"BUILDING", "CONTRACTING"}
+        assert r.stage == "CONTRACTING"
 
 
 # ---------- scorer sub-score unit tests (targeted per-rule) ----------
@@ -278,8 +280,9 @@ def test_decision_requires_minimum_vcp_even_with_high_tech_and_rs():
     )
     r = score_candidate(t, _strong_fundamentals(), rs_score=0.9)
     assert r.vcp_score is not None and r.vcp_score < vs.WATCHLIST_VCP
-    assert r.decision == "REJECT"
-    assert r.stage == "STAGE3_FAIL"
+    # Low-vcp / no-setup lands outside BUY_ALERT + WATCHLIST by definition.
+    assert r.decision in {"IGNORE", "SKIP"}
+    assert r.stage in {"TREND", "BASE_BUILDING", "NONE", "BREAKOUT", "EXTENDED"}
     # RS boost must not be recorded either (gated on vcp >= WATCHLIST_VCP).
     assert not any("rs_boost" in x for x in r.reasons)
 
@@ -324,9 +327,9 @@ def test_scan_date_detects_vcp_candidate(tmp_path: Path):
             "SELECT symbol, decision, stage, final_score FROM vcp_candidates"
         ).fetchone()
     assert row[0] == "VCP"
-    # Fundamentals missing on synthetic symbol → STAGE2_FAIL is expected.
+    # Fundamentals missing on synthetic symbol → stage-2 hard-fail.
     assert row[1] == "REJECT"
-    assert row[2] == "STAGE2_FAIL"
+    assert row[2] == "FAIL"
 
 
 def test_cli_vcp_scan_smoke(tmp_path: Path):

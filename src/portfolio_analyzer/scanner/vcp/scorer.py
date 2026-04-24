@@ -4,9 +4,13 @@ Four stages per candidate:
 1. Stage-1 hard filters (liquidity, trend, price strength, near-highs).
 2. Stage-2 fundamentals (hard rejects + soft 0..1 score).
 3. Stage-3 VCP detection — 6 sub-scores blended into ``vcp_score``.
-4. Readiness + final blend → ``decision``.
+4. Lifecycle state detection → decision map (see ``_detect_state``).
 
 All scores are decimals in [0, 1] unless otherwise noted.
+
+Lifecycle states (mutually exclusive, priority-ordered):
+    EXTENDED > BREAKOUT > READY > CONTRACTING > BASE_BUILDING > TREND > NONE.
+Stage-1/2 hard-fail short-circuits to ``stage=FAIL`` / ``decision=REJECT``.
 """
 from __future__ import annotations
 
@@ -43,11 +47,39 @@ BREAKOUT_PRESSURE_BONUS = 0.05
 SHAKEOUT_BONUS = 0.10
 RS_BOOST_MAX = 0.20            # combined *= (1 + 0.2 * min(rs,1)) when rs > 0
 
-# Decision thresholds
-BUY_FINAL = 0.75
-BUY_PIVOT_BAND = 0.02          # within 2% of pivot
-WATCHLIST_FINAL = 0.55
+# RS boost gate (applies to combined_score, not to state detection)
 WATCHLIST_VCP = 0.40
+
+# State-machine thresholds (D-S23)
+STATE_READY_VCP = 0.55
+STATE_READY_PIVOT = 0.60
+STATE_READY_RANGE_20D = 0.08
+STATE_READY_STD5 = 0.010
+STATE_READY_DIST_BELOW = -0.02
+STATE_CONTRACTING_VCP = 0.45
+STATE_CONTRACTING_VOLATILITY = 0.50
+STATE_CONTRACTING_VOLUME = 0.50
+STATE_CONTRACTING_RANGE_20D = 0.10
+STATE_BASE_VCP = 0.30
+STATE_BASE_STRUCTURE = 0.30
+STATE_BASE_RANGE_LO = 0.08     # range_20d must be > 0.08 to be BASE (else CONTRACTING)
+STATE_BASE_RANGE_HI = 0.15
+STATE_TREND_RETURN_3M = 0.10
+STATE_TREND_RANGE_MIN = 0.15
+STATE_TREND_VCP_MAX = 0.30
+STATE_EXTENDED_DIST = 0.05
+STATE_EXTENDED_EMA50_DIST = 0.15
+
+STATE_TO_DECISION: dict[str, str] = {
+    "READY": "BUY_ALERT",
+    "CONTRACTING": "WATCHLIST",
+    "BASE_BUILDING": "IGNORE",
+    "TREND": "IGNORE",
+    "NONE": "IGNORE",
+    "BREAKOUT": "SKIP",
+    "EXTENDED": "SKIP",
+    "FAIL": "REJECT",
+}
 
 
 @dataclass
@@ -225,23 +257,87 @@ def _readiness_score(t: TechnicalFeatures) -> float:
     return _clamp(1.0 - abs(d) / band)
 
 
+def _detect_state(
+    t: TechnicalFeatures, vcp: float, parts: dict[str, float],
+) -> str:
+    """Classify lifecycle stage. Priority-ordered; first match wins.
+
+    EXTENDED > BREAKOUT > READY > CONTRACTING > BASE_BUILDING > TREND > NONE.
+    """
+    d = t.distance_to_pivot
+    r20 = t.range_20d
+    r5 = t.range_5d_norm
+
+    # EXTENDED: post-breakout run, expanding volatility, stretched from EMA50.
+    if (d is not None and d > STATE_EXTENDED_DIST
+            and t.atr_expanding is True
+            and t.distance_to_ema50 is not None
+            and t.distance_to_ema50 > STATE_EXTENDED_EMA50_DIST):
+        return "EXTENDED"
+
+    # BREAKOUT: crossed pivot on volume spike with 5-day range expansion.
+    if (d is not None and d > 0.0
+            and r5 is not None and r20 is not None and r5 > r20
+            and t.volume_spike is True):
+        return "BREAKOUT"
+
+    # READY: coiled just below (or at) pivot, pivot tight, std collapsed.
+    if (vcp >= STATE_READY_VCP
+            and d is not None and STATE_READY_DIST_BELOW <= d <= 0.0
+            and parts.get("pivot", 0.0) > STATE_READY_PIVOT
+            and r20 is not None and r20 <= STATE_READY_RANGE_20D
+            and t.close_std_5_norm is not None
+            and t.close_std_5_norm < STATE_READY_STD5):
+        return "READY"
+
+    # CONTRACTING: valid VCP forming — tightening volatility, declining volume.
+    if (vcp >= STATE_CONTRACTING_VCP
+            and parts.get("contraction", 0.0) > 0.0
+            and parts.get("volatility", 0.0) > STATE_CONTRACTING_VOLATILITY
+            and parts.get("volume", 0.0) > STATE_CONTRACTING_VOLUME
+            and r20 is not None and r20 <= STATE_CONTRACTING_RANGE_20D):
+        return "CONTRACTING"
+
+    # BASE_BUILDING: early consolidation; looser than CONTRACTING.
+    if (r20 is not None
+            and STATE_BASE_RANGE_LO < r20 <= STATE_BASE_RANGE_HI
+            and vcp >= STATE_BASE_VCP
+            and parts.get("structure", 0.0) >= STATE_BASE_STRUCTURE):
+        return "BASE_BUILDING"
+
+    # TREND: strong uptrend but no meaningful consolidation yet.
+    if (t.return_3m is not None and t.return_3m > STATE_TREND_RETURN_3M
+            and r20 is not None and r20 > STATE_TREND_RANGE_MIN
+            and vcp < STATE_TREND_VCP_MAX):
+        return "TREND"
+
+    return "NONE"
+
+
 def score_candidate(
     t: TechnicalFeatures, f: FundamentalFeatures | None,
     *, rs_score: float | None = None,
 ) -> ScoreBreakdown:
-    """End-to-end scoring; returns decision, stage, and all sub-scores."""
+    """End-to-end scoring; returns decision, stage, and all sub-scores.
+
+    ``stage`` carries the 8-valued lifecycle state (TREND/BASE_BUILDING/
+    CONTRACTING/READY/BREAKOUT/EXTENDED/NONE/FAIL); ``decision`` is the
+    projection via ``STATE_TO_DECISION``.
+    """
     reasons: list[str] = []
 
     s1_fails = _stage1_hard(t)
     if s1_fails:
         return ScoreBreakdown(
-            decision="REJECT", stage="STAGE1_FAIL", reasons=s1_fails,
+            decision="REJECT", stage="FAIL",
+            reasons=["stage1:" + ",".join(s1_fails)],
         )
 
     s2_fails = _stage2_hard(f)
     if s2_fails:
         return ScoreBreakdown(
-            decision="REJECT", stage="STAGE2_FAIL", reasons=s2_fails,
+            decision="REJECT", stage="FAIL",
+            reasons=["stage2:" + ",".join(s2_fails)],
         )
     assert f is not None  # narrowed by _stage2_hard
 
@@ -258,24 +354,15 @@ def score_candidate(
     combined = _clamp(combined)
     final = combined * (0.5 + 0.5 * readiness)
 
-    reasons.extend(f"{k}={v:.2f}" for k, v in parts.items())
+    state = _detect_state(t, vcp, parts)
+    decision = STATE_TO_DECISION[state]
 
-    has_vcp = vcp >= WATCHLIST_VCP
-    if (has_vcp
-            and final >= BUY_FINAL
-            and t.distance_to_pivot is not None
-            and abs(t.distance_to_pivot) <= BUY_PIVOT_BAND):
-        decision, stage = "BUY_ALERT", "READY"
-    elif has_vcp and final >= WATCHLIST_FINAL:
-        decision, stage = "WATCHLIST", "BUILDING"
-    elif has_vcp:
-        decision, stage = "WATCHLIST", "CONTRACTING"
-    else:
-        decision, stage = "REJECT", "STAGE3_FAIL"
+    reasons.append(f"state={state}")
+    reasons.extend(f"{k}={v:.2f}" for k, v in parts.items())
 
     return ScoreBreakdown(
         decision=decision,
-        stage=stage,
+        stage=state,
         technical_score=tech,
         fundamental_score=fund,
         vcp_score=vcp,
