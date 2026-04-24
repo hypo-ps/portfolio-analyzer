@@ -427,5 +427,53 @@ def scanner_fundamentals_ingest(
     sys.stdout.write(json.dumps(payload, indent=2) + "\n")
 
 
+@scanner.command("vcp-scan")
+@click.option("--date", "date_str", type=str, default=None,
+              help="Scan as-of date (YYYY-MM-DD). Default: latest ingested bar.")
+@click.option("--symbol", "symbols", type=str, multiple=True,
+              help="Limit to one or more symbols (repeatable).")
+@click.option("--limit", type=int, default=None,
+              help="Scan at most N symbols from the universe.")
+@click.option("--store-rejects", is_flag=True, default=False,
+              help="Persist REJECT rows too (default: WATCHLIST/BUY_ALERT only).")
+@_db_option
+def scanner_vcp_scan(
+    date_str: str | None, symbols: tuple[str, ...], limit: int | None,
+    store_rejects: bool, db_path: Path | None,
+) -> None:
+    """Run the VCP scanner and upsert candidates into vcp_candidates."""
+    from portfolio_analyzer.scanner.db import default_db_path, open_db
+    from portfolio_analyzer.scanner.vcp.scan import scan_date
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if date_str:
+        trade_date = dt.date.fromisoformat(date_str)
+    else:
+        path = db_path or default_db_path()
+        with open_db(path) as conn:
+            row = conn.execute("SELECT MAX(trade_date) FROM market_data").fetchone()
+        if not row or not row[0]:
+            sys.stdout.write(json.dumps({"error": "no market_data; ingest first"}) + "\n")
+            sys.exit(1)
+        trade_date = dt.date.fromisoformat(row[0])
+
+    result = scan_date(
+        trade_date,
+        db_path=db_path,
+        only_symbols=symbols or None,
+        limit=limit,
+        store_rejects=store_rejects,
+    )
+    payload = {
+        "trade_date": result.trade_date.isoformat(),
+        "universe": result.universe,
+        "scored": result.scored,
+        "skipped_history": result.skipped_history,
+        "by_decision": result.by_decision,
+        "stored": result.stored,
+    }
+    sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+
+
 if __name__ == "__main__":
     main()
