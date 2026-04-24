@@ -43,6 +43,9 @@ _PL_LABEL_MAP = {
     "Dividend Payout %": "dividend_payout_pct",
 }
 
+# Quarterly P&L labels: Screener's #quarters table omits Dividend Payout %.
+_QL_LABEL_MAP = {k: v for k, v in _PL_LABEL_MAP.items() if v != "dividend_payout_pct"}
+
 _BS_LABEL_MAP = {
     "Equity Capital": "equity_capital_cr",
     "Reserves": "reserves_cr",
@@ -68,6 +71,7 @@ class ScreenerCompany:
     meta: dict[str, object] = field(default_factory=dict)
     annual_financials: list[dict[str, object]] = field(default_factory=list)
     annual_ratios: list[dict[str, object]] = field(default_factory=list)
+    quarterly_financials: list[dict[str, object]] = field(default_factory=list)
 
 
 class ScreenerNotFoundError(Exception):
@@ -162,6 +166,33 @@ def _fiscal_year_from_header(text: str) -> int | None:
     return int(m.group(2))
 
 
+_MONTH_TO_QUARTER_END = {
+    "jan": "01-31", "feb": "02-28", "mar": "03-31",
+    "apr": "04-30", "may": "05-31", "jun": "06-30",
+    "jul": "07-31", "aug": "08-31", "sep": "09-30",
+    "oct": "10-31", "nov": "11-30", "dec": "12-31",
+}
+
+
+def _period_end_from_header(text: str) -> str | None:
+    """Convert 'Mar 2023' → '2023-03-31' (ISO last-day of quarter-end month).
+
+    Returns ``None`` for empty, 'TTM', or short-period headers.
+    """
+    s = (text or "").strip()
+    if not s or s.upper() == "TTM":
+        return None
+    if re.search(r"\d+m$", s):
+        return None
+    m = re.match(r"^\s*([A-Za-z]{3})\s+(\d{4})\s*$", s)
+    if not m:
+        return None
+    tail = _MONTH_TO_QUARTER_END.get(m.group(1).lower())
+    if tail is None:
+        return None
+    return f"{m.group(2)}-{tail}"
+
+
 def _top_ratio_value(items: list[str], label: str) -> str | None:
     """Return the raw value string from 'top-ratios' li for a given label."""
     for li in items:
@@ -244,6 +275,44 @@ def _parse_year_table(
     return out
 
 
+def _parse_quarter_table(
+    section: Tag | None, label_map: dict[str, str],
+) -> dict[str, dict[str, object]]:
+    """Given Screener's #quarters table, return {period_end: {col: value}}.
+
+    ``period_end`` is ISO YYYY-MM-DD of the last day of the quarter-end month.
+    """
+    out: dict[str, dict[str, object]] = {}
+    if section is None:
+        return out
+    table = section.find("table")
+    if table is None:
+        return out
+    thead = table.find("thead")
+    if thead is None:
+        return out
+    header_cells = [th.get_text(strip=True) for th in thead.find_all("th")]
+    periods = [_period_end_from_header(h) for h in header_cells]
+    tbody = table.find("tbody")
+    if tbody is None:
+        return out
+    for tr in tbody.find_all("tr"):
+        cells = tr.find_all(["td", "th"])
+        if not cells:
+            continue
+        label_raw = cells[0].get_text(strip=True).rstrip("+").strip()
+        col = label_map.get(label_raw)
+        if col is None:
+            continue
+        for idx, td in enumerate(cells[1:], start=1):
+            period = periods[idx] if idx < len(periods) else None
+            if period is None:
+                continue
+            val = _clean_number(td.get_text(strip=True))
+            out.setdefault(period, {"period_end": period})[col] = val
+    return out
+
+
 def parse_company(symbol: str, html: str, *, variant: str = "consolidated") -> ScreenerCompany:
     """Parse a Screener HTML document into a typed ``ScreenerCompany``."""
     soup = BeautifulSoup(html, "html.parser")
@@ -259,12 +328,15 @@ def parse_company(symbol: str, html: str, *, variant: str = "consolidated") -> S
             {k: v for k, v in row.items() if k != "fiscal_year"}
         )
     ratios = _parse_year_table(soup.select_one("#ratios"), _RATIOS_LABEL_MAP)
+    quarters = _parse_quarter_table(soup.select_one("#quarters"), _QL_LABEL_MAP)
 
     annual_financials = sorted(pl.values(), key=lambda r: r["fiscal_year"])  # type: ignore[arg-type]
     annual_ratios = sorted(ratios.values(), key=lambda r: r["fiscal_year"])  # type: ignore[arg-type]
+    quarterly_financials = sorted(quarters.values(), key=lambda r: r["period_end"])  # type: ignore[arg-type]
     return ScreenerCompany(
         symbol=symbol, name=name, variant=variant,
         meta=meta,
         annual_financials=annual_financials,
         annual_ratios=annual_ratios,
+        quarterly_financials=quarterly_financials,
     )

@@ -164,6 +164,28 @@ SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS financials_quarterly (
+        isin TEXT NOT NULL,
+        period_end TEXT NOT NULL,
+        source TEXT NOT NULL,
+        report_type TEXT NOT NULL DEFAULT 'consolidated',
+        sales_cr REAL,
+        expenses_cr REAL,
+        operating_profit_cr REAL,
+        opm_pct REAL,
+        other_income_cr REAL,
+        interest_cr REAL,
+        depreciation_cr REAL,
+        profit_before_tax_cr REAL,
+        tax_pct REAL,
+        net_profit_cr REAL,
+        eps REAL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY (isin, period_end, source, report_type),
+        FOREIGN KEY (isin) REFERENCES stock_master(isin)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS fundamentals_ingestion_log (
         isin TEXT NOT NULL,
         source TEXT NOT NULL,
@@ -176,6 +198,7 @@ SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_fin_annual_year ON financials_annual(fiscal_year)",
     "CREATE INDEX IF NOT EXISTS idx_fund_meta_sector ON fundamentals_meta(sector)",
+    "CREATE INDEX IF NOT EXISTS idx_fin_quarterly_period ON financials_quarterly(period_end)",
     """
     CREATE TABLE IF NOT EXISTS vcp_candidates (
         isin TEXT NOT NULL,
@@ -493,6 +516,12 @@ _RATIOS_ANNUAL_COLS = (
     "cash_conversion_cycle", "working_capital_days",
 )
 
+_FIN_QUARTERLY_COLS = (
+    "sales_cr", "expenses_cr", "operating_profit_cr", "opm_pct",
+    "other_income_cr", "interest_cr", "depreciation_cr",
+    "profit_before_tax_cr", "tax_pct", "net_profit_cr", "eps",
+)
+
 
 def upsert_fundamentals_meta(
     conn: sqlite3.Connection, isin: str, source: str, meta: dict[str, object],
@@ -567,6 +596,35 @@ def upsert_ratios_annual(
     return len(payload)
 
 
+def upsert_financials_quarterly(
+    conn: sqlite3.Connection, isin: str, source: str, report_type: str,
+    rows: Iterable[dict[str, object]],
+) -> int:
+    now = dt.datetime.now().isoformat()
+    payload: list[tuple] = []
+    for r in rows:
+        period = r.get("period_end")
+        if not period:
+            continue
+        payload.append((
+            isin, str(period), source, report_type,
+            *[r.get(c) for c in _FIN_QUARTERLY_COLS], now,
+        ))
+    if not payload:
+        return 0
+    cols = ", ".join(
+        ("isin", "period_end", "source", "report_type", *_FIN_QUARTERLY_COLS, "fetched_at")
+    )
+    placeholders = ", ".join(["?"] * (len(_FIN_QUARTERLY_COLS) + 5))
+    updates = ", ".join(f"{c} = excluded.{c}" for c in (*_FIN_QUARTERLY_COLS, "fetched_at"))
+    conn.executemany(
+        f"INSERT INTO financials_quarterly ({cols}) VALUES ({placeholders}) "
+        f"ON CONFLICT(isin, period_end, source, report_type) DO UPDATE SET {updates}",
+        payload,
+    )
+    return len(payload)
+
+
 def record_fundamentals_ingestion(
     conn: sqlite3.Connection, isin: str, source: str, status: str,
     *, detail: str | None = None, report_type: str | None = None,
@@ -606,6 +664,7 @@ def fundamentals_summary(conn: sqlite3.Connection) -> dict[str, object]:
     covered = conn.execute("SELECT COUNT(*) FROM fundamentals_meta").fetchone()[0]
     annual = conn.execute("SELECT COUNT(*) FROM financials_annual").fetchone()[0]
     ratios = conn.execute("SELECT COUNT(*) FROM ratios_annual").fetchone()[0]
+    quarterly = conn.execute("SELECT COUNT(*) FROM financials_quarterly").fetchone()[0]
     by_status_rows = conn.execute(
         "SELECT status, COUNT(*) FROM fundamentals_ingestion_log "
         "GROUP BY status ORDER BY status"
@@ -617,6 +676,7 @@ def fundamentals_summary(conn: sqlite3.Connection) -> dict[str, object]:
         "companies_covered": covered,
         "annual_rows": annual,
         "ratios_rows": ratios,
+        "quarterly_rows": quarterly,
         "by_status": {s: c for s, c in by_status_rows},
         "last_fetch": last,
     }

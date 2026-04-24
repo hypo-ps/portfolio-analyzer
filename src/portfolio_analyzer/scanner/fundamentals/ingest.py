@@ -95,6 +95,9 @@ def ingest_one(
     sdb.upsert_ratios_annual(
         conn, isin, SOURCE, company.variant, company.annual_ratios,
     )
+    sdb.upsert_financials_quarterly(
+        conn, isin, SOURCE, company.variant, company.quarterly_financials,
+    )
     sdb.record_fundamentals_ingestion(
         conn, isin, SOURCE, "ok", report_type=company.variant,
     )
