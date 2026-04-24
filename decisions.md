@@ -1184,3 +1184,61 @@ rally couldn't be re-joined. Two targeted changes:
 - **Out of scope:** quarterly ratios (`#ratios` is annual-only on
   Screener), derived "acceleration" features on top of quarterly rows —
   those are a VCP fundamentals-layer ADR (future D-S25+).
+
+
+### D-S25. Structural pivot — last swing-high in a 40-bar base window
+- **Decision:** Replace the 10-bar close-max pivot with a structural pivot
+  computed over a 40-bar window (`PIVOT_WINDOW = 40`). The pivot is the
+  **last 5-bar fractal swing-high** whose bar-index falls inside the
+  window; if no swing sits there, fall back to the highest close over the
+  last 40 bars. `pivot_range` keeps its "tightness of the last 10 bars"
+  semantics (so `PIVOT_RANGE_MAX = 0.08` stays meaningful). `pivot_touches`
+  now counts closes within ±2% of the pivot over the full 40-bar base
+  (was: last 10 bars).
+- **Rationale:** The original 10-bar `closes[-10:].max()` is a micro-pivot,
+  not a base pivot. Real VCP pivots form over 3–8 weeks (15–40 bars); a
+  10-bar window produces a noisy, near-price pivot that causes
+  `distance_to_pivot` to hug zero regardless of structure. The symptoms:
+  stocks that had visibly broken out weeks earlier were still being
+  classified as `CONTRACTING`/`READY` because their "pivot" was the
+  already-broken-out level, and stocks with a clean base but a drifting
+  last-10-bar top were rejected for being "far from pivot". Widening to
+  40 bars aligns the metric with how traders draw base pivots and makes
+  `distance_to_pivot` a true measure of base position.
+- **Fallback rationale:** In monotone uptrends with no fractal structure,
+  no swing-highs exist inside the window; using `closes[-40:].max()`
+  preserves a sensible pivot (the highest recent close) so those names
+  don't silently lose the feature. TREND-state names exercise this branch.
+- **Code changes (`scanner/vcp/features.py`):**
+  - New module constant `PIVOT_WINDOW = 40`.
+  - `_find_swings` is now called **before** the pivot block so the pivot
+    lookup can scan `sh_all` for swings inside the base window. Return
+    shape of `TechnicalFeatures` is unchanged.
+  - Pivot block rewritten: `recent_swings = [(i,p) for i,p in sh_all if
+    i >= n-PIVOT_WINDOW]`; prefer last entry, else fallback to
+    `closes[-PIVOT_WINDOW:].max()`. `pivot_touches` now scans the 40-bar
+    slice.
+- **Calibration:** `_pivot_score` (in `scorer.py`) and
+  `MIN_PIVOT_TOUCHES = 2` are unchanged. Because retests are counted over
+  40 bars instead of 10, a well-formed base will generally produce more
+  touches, so the "halve if touches < 2" penalty fires less often — this
+  is intended: a well-retested pivot is a quality signal, and the old
+  10-bar window under-counted it.
+- **Compatibility:** Stored `vcp_candidates` rows scored under the
+  10-bar pivot become stale (the `pivot`, `distance_to_pivot`, and
+  `pivot_touches` columns carry the old semantics). A re-scan is required
+  to refresh them; no schema change.
+- **Tests (41 total in `test_scanner_vcp.py`, up from 39):**
+  - `test_pivot_picks_last_swing_high_in_window_over_10bar_max` — injects
+    a clear fractal peak 25 bars back on an otherwise flat series; asserts
+    `pivot == 110.0` even though the 10-bar max is far lower.
+  - `test_pivot_falls_back_to_window_max_without_swing` — strictly
+    monotone rise (no fractal pivots possible); asserts
+    `pivot == closes[-40:].max()` and `swing_highs == ()`.
+  - `test_compute_technical_features_on_vcp_series` — `distance_to_pivot`
+    assertion loosened from `<0.01` to `<0.05` (the old bound encoded the
+    micro-pivot's "close pinned 0.5% below 10-bar max" behaviour).
+  - All 271 existing tests pass.
+- **Out of scope:** base-depth feature (structural low since pivot),
+  days-since-pivot, volume-at-pivot, Darvas-style box boundary detection,
+  base-count (first-base vs. third-base) — these belong to a later ADR.

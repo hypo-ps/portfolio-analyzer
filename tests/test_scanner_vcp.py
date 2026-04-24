@@ -98,13 +98,49 @@ def test_compute_technical_features_on_vcp_series():
     assert t.ema50 > t.ema200                    # uptrend stack
     assert t.close > t.ema50
     assert t.return_1y > 0.20
-    assert abs(t.distance_to_pivot) < 0.01
+    # Structural pivot (D-S25): close must sit within the base window, not
+    # necessarily 1% below the 10-bar max as in the old micro-pivot rule.
+    assert abs(t.distance_to_pivot) < 0.05
     assert t.range_20d < 0.10
     # Swing structure: 3 rising lows and 3 rising highs
     assert len(t.swing_highs) == 3
     assert len(t.swing_lows) == 3
     lows_ = [p for _, p in t.swing_lows]
     assert lows_[2] > lows_[1] > lows_[0]
+
+
+def test_pivot_picks_last_swing_high_in_window_over_10bar_max():
+    """D-S25: structural pivot must outrank the micro-pivot when a
+    genuine swing-high sits further back inside the base window."""
+    n = 300
+    closes = np.linspace(99.9, 99.5, n)  # strictly decreasing → no native swings
+    highs = closes.copy()
+    lows = closes.copy()
+    peak_idx = n - 25  # 25 bars back, inside the 40-bar window
+    for off, val in [(-2, 102.0), (-1, 105.0), (0, 110.0), (1, 105.0), (2, 102.0)]:
+        highs[peak_idx + off] = val
+        closes[peak_idx + off] = val
+    vol = np.full(n, 100_000.0)
+    t = vf.compute_technical_features(closes, highs, lows, closes, vol)
+    assert t is not None
+    assert t.pivot == pytest.approx(110.0)
+    assert t.distance_to_pivot == pytest.approx(
+        (float(closes[-1]) - 110.0) / 110.0,
+    )
+
+
+def test_pivot_falls_back_to_window_max_without_swing():
+    """D-S25: with no swing-high inside the base window, pivot falls back
+    to the highest close over the last ``PIVOT_WINDOW`` bars."""
+    n = 300
+    closes = np.linspace(100.0, 150.0, n)  # monotone rise → no fractal pivot
+    highs = closes + 0.01
+    lows = closes - 0.01
+    vol = np.full(n, 100_000.0)
+    t = vf.compute_technical_features(closes, highs, lows, closes, vol)
+    assert t is not None
+    assert t.swing_highs == ()
+    assert t.pivot == pytest.approx(float(closes[-vf.PIVOT_WINDOW:].max()))
 
 
 # ---------- scorer pipeline tests ----------

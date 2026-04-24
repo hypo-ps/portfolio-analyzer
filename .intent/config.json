@@ -1,0 +1,22 @@
+{
+  "scripts": [
+    {
+      "name": "test",
+      "command": "pytest",
+      "mode": "command",
+      "category": "test"
+    },
+    {
+      "name": "lint",
+      "command": "ruff check .",
+      "mode": "command",
+      "category": "lint"
+    },
+    {
+      "name": "format",
+      "command": "ruff format .",
+      "mode": "command",
+      "category": "format"
+    }
+  ]
+}

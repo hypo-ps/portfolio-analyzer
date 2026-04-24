@@ -19,6 +19,8 @@ import numpy as np
 # Minimum history so EMA200 and 1y return stabilize.
 MIN_BARS = 252
 SWING_FRACTAL_N = 5
+# Base window the structural pivot is searched over (≈2 trading months).
+PIVOT_WINDOW = 40
 
 
 @dataclass(frozen=True)
@@ -213,21 +215,35 @@ def compute_technical_features(
         ll5 = float(lows[-5:].min())
         range_5d_norm = (hh5 - ll5) / close
 
-    # Pivot = max close of last 10 bars
+    # Swing structure — computed first so the pivot block can consult sh_all.
+    sh_all, sl_all = _find_swings(highs, lows)
+    swing_highs = tuple(sh_all[-3:])
+    swing_lows = tuple(sl_all[-3:])
+
+    # Structural pivot (D-S25): last swing-high within the base window; falls
+    # back to the highest close in the window if no swing sits there.
+    # pivot_range keeps its "last-10-bar tightness" semantics so the existing
+    # PIVOT_RANGE_MAX calibration stays meaningful.
     pivot: float | None = None
     pivot_range: float | None = None
     distance_to_pivot: float | None = None
     pivot_touches: int | None = None
-    if n >= 10:
-        pivot = float(closes[-10:].max())
-        hh10 = float(highs[-10:].max())
-        ll10 = float(lows[-10:].min())
-        if close > 0:
+    if n >= PIVOT_WINDOW:
+        window_start = n - PIVOT_WINDOW
+        recent_swings = [(i, p) for i, p in sh_all if i >= window_start]
+        if recent_swings:
+            pivot = float(recent_swings[-1][1])
+        else:
+            pivot = float(closes[-PIVOT_WINDOW:].max())
+        if close > 0 and pivot > 0:
+            distance_to_pivot = (close - pivot) / pivot
+            hh10 = float(highs[-10:].max())
+            ll10 = float(lows[-10:].min())
             pivot_range = (hh10 - ll10) / close
-            distance_to_pivot = (close - pivot) / pivot if pivot > 0 else None
-        if pivot > 0:
             band = 0.02 * pivot
-            pivot_touches = int(np.sum(np.abs(closes[-10:] - pivot) <= band))
+            pivot_touches = int(
+                np.sum(np.abs(closes[-PIVOT_WINDOW:] - pivot) <= band)
+            )
 
     close_std_5_norm: float | None = None
     if n >= 5 and close > 0:
@@ -249,11 +265,6 @@ def compute_technical_features(
     distance_to_ema50: float | None = None
     if ema50 is not None and ema50 > 0:
         distance_to_ema50 = (close - ema50) / ema50
-
-    # Swing structure — last 3 highs / 3 lows
-    sh_all, sl_all = _find_swings(highs, lows)
-    swing_highs = tuple(sh_all[-3:])
-    swing_lows = tuple(sl_all[-3:])
 
     return TechnicalFeatures(
         close=close,

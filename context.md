@@ -362,8 +362,9 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
   `TechnicalFeatures` dataclass: EMA50/200 + 20d slope, ATR14/50,
   ATR5/ATR30 compression, 1y / 3m / 20d returns, 52w band and distance,
   avg-volume/turnover (20d/50d), per-bar 50d volume vector, 20d normalized
-  range, 10-bar close pivot with distance, 5-bar close-std (normalized),
-  pivot-touch count (closes within 2% of pivot), 20-bar log-volume slope,
+  range, 40-bar structural pivot (last swing-high, else window-max) with
+  distance, 5-bar close-std (normalized), pivot-touch count
+  (closes within 2% of pivot across the 40-bar window), 20-bar log-volume slope,
   and the last three 5-bar fractal swing highs / lows.
 - `scanner/vcp/fundamentals.py` — per-ISIN `FundamentalFeatures` from
   `fundamentals_meta` + `financials_annual`: sector, market-cap, PE, ROE,
