@@ -1142,3 +1142,45 @@ rally couldn't be re-joined. Two targeted changes:
 - **Tests:** all 268 existing tests still pass. `test_state_contracting_on_valid_vcp`
   remains representative (all four sub-scores hit → 4 of 4 subs); no
   new tests added.
+
+#### D-S24. Ingest Screener quarterly P&L into `financials_quarterly`
+- **Decision:** Parse the `#quarters` table from Screener company pages and
+  persist it into a new `financials_quarterly(isin, period_end, source,
+  report_type, ...)` table keyed by the quarter-end month's last day
+  (ISO `YYYY-MM-DD`). `period_end` replaces `fiscal_year` as the temporal
+  key because quarterly reporting is month-level.
+- **Rationale:** Annual P&L gives trend but not cadence — a trailing-
+  four-quarters QoQ or YoY acceleration signal (sales or EPS growth
+  picking up in the latest quarter) is a classic Minervini / Mark Ritchie
+  leading indicator for pre-breakout names. Having the quarters in the
+  same DB as `financials_annual` lets the VCP fundamentals layer add
+  "recent-quarter acceleration" sub-scores without a separate fetch.
+- **Columns captured (11):** `sales_cr`, `expenses_cr`,
+  `operating_profit_cr`, `opm_pct`, `other_income_cr`, `interest_cr`,
+  `depreciation_cr`, `profit_before_tax_cr`, `tax_pct`, `net_profit_cr`,
+  `eps`. Screener's quarterly table omits `Dividend Payout %` (it is an
+  annual-only metric), so `_QL_LABEL_MAP` is derived from `_PL_LABEL_MAP`
+  minus that key. Balance-sheet fields are not reported quarterly by
+  Screener and are deliberately excluded.
+- **Date handling:** `_period_end_from_header("Mar 2023") → "2023-03-31"`
+  via a month→last-day lookup (`Mar→03-31`, `Jun→06-30`, `Sep→09-30`,
+  `Dec→12-31`, etc.). `TTM` and short-period headers (`Mar 20183m`,
+  `9m`) are rejected, matching the annual parser's behaviour. Storing
+  ISO dates keeps lexicographic sort order identical to chronological
+  order, so `ORDER BY period_end` works without parsing.
+- **Idempotency:** same `INSERT … ON CONFLICT(isin, period_end, source,
+  report_type) DO UPDATE SET` pattern used for annual tables. Re-running
+  the ingest is a no-op on row count; a re-fetch updates in place.
+- **Pipeline wiring:** `ingest_one` now calls
+  `sdb.upsert_financials_quarterly` after the annual + ratios upserts and
+  before `record_fundamentals_ingestion`. `fundamentals_summary` grows a
+  `quarterly_rows` field surfaced by `scanner status`.
+- **Tests:** `test_period_end_from_header` (boundary cases),
+  fixture assertion on INFY's 13 quarterly rows (sorted, unique, no
+  dividend-payout key), db roundtrip (`n_q == len(quarterly_financials)`
+  and `summary["quarterly_rows"]` matches), idempotency (re-run → same
+  row count), CLI status smoke (`quarterly_rows > 0`). Total: 269 tests
+  passing (up from 268).
+- **Out of scope:** quarterly ratios (`#ratios` is annual-only on
+  Screener), derived "acceleration" features on top of quarterly rows —
+  those are a VCP fundamentals-layer ADR (future D-S25+).

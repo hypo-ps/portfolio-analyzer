@@ -335,8 +335,8 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
 - `scanner/fundamentals/screener.py` — fetches
   `screener.in/company/{SYMBOL}/{variant}/` with a 2s throttle and
   exponential backoff, falling back from `consolidated` to `standalone`;
-  parses the `top-ratios` block, `#profit-loss`, `#balance-sheet` and
-  `#ratios` tables into a typed `ScreenerCompany`.
+  parses the `top-ratios` block, `#profit-loss`, `#balance-sheet`,
+  `#ratios` and `#quarters` tables into a typed `ScreenerCompany`.
 - `scanner/fundamentals/ingest.py` — iterates `stock_master`, skips ISINs
   whose last successful fetch is newer than `SCREENER_REFRESH_AFTER_DAYS`
   (7 days by default), upserts per-symbol, and logs status to
@@ -348,6 +348,10 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
     sales, expenses, OPM%, net profit, EPS, borrowings, total assets.
   - `ratios_annual(isin, fiscal_year, source, report_type, ...)` — debtor
     days, inventory days, CCC, working-capital days, ROCE%.
+  - `financials_quarterly(isin, period_end, source, report_type, ...)` —
+    quarterly P&L (sales, expenses, OPM%, interest, depreciation, PBT,
+    tax%, net profit, EPS). `period_end` is the ISO last-day of the
+    quarter-end month, e.g. `Mar 2024 → 2024-03-31`.
   - `fundamentals_ingestion_log(isin, source, status, detail, report_type,
     fetched_at)` — per-symbol outcome, drives the freshness skip.
 - Money columns store rupees crore; percentages store decimals (28% → 0.28).
@@ -442,6 +446,6 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
 - BSE ingestion, dual-listed dedupe, SME series
 - Rights / merger / demerger price adjustments
 - Dividend-adjusted total-return series
-- Tickertape / Yahoo fundamentals fallbacks, quarterly P&L, cash flow
+- Tickertape / Yahoo fundamentals fallbacks, cash flow statement
 - VCP backtesting (forward-test harness and win-rate calibration)
 - Any change to the Phase 0 live analyzer or backtest contracts

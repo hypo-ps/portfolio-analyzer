@@ -68,6 +68,10 @@ VCP detection and fundamentals remain out of scope for this slice.
       annual P&L, balance-sheet highlights and ratios.
       Tables: `fundamentals_meta`, `financials_annual`, `ratios_annual`,
       `fundamentals_ingestion_log`. CLI: `scanner fundamentals-ingest`.
+- [x] Quarterly P&L ingestion (D-S24): parse Screener's `#quarters` table
+      into `financials_quarterly(isin, period_end, source, report_type,
+      ...)` with ISO period-end keys; wired into `ingest_one` and surfaced
+      in `fundamentals_summary.quarterly_rows`.
 - [ ] BSE bhavcopy ingestion (same UDiFF format on BSE's server).
 - [ ] Cross-exchange ISIN mapping + dedupe for dual-listed names.
 - [ ] SME series (`SctySrs=SM`) as a separate universe.
