@@ -176,6 +176,30 @@ SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_fin_annual_year ON financials_annual(fiscal_year)",
     "CREATE INDEX IF NOT EXISTS idx_fund_meta_sector ON fundamentals_meta(sector)",
+    """
+    CREATE TABLE IF NOT EXISTS vcp_candidates (
+        isin TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        close REAL,
+        pivot REAL,
+        distance_to_pivot REAL,
+        technical_score REAL,
+        vcp_score REAL,
+        fundamental_score REAL,
+        readiness_score REAL,
+        combined_score REAL,
+        final_score REAL,
+        decision TEXT NOT NULL,
+        stage TEXT,
+        reasons TEXT,
+        computed_at TEXT NOT NULL,
+        PRIMARY KEY (isin, trade_date),
+        FOREIGN KEY (isin) REFERENCES stock_master(isin)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_vcp_date_score ON vcp_candidates(trade_date, final_score DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_vcp_decision ON vcp_candidates(decision)",
 ]
 
 
@@ -307,6 +331,7 @@ def ingestion_summary(conn: sqlite3.Connection) -> dict[str, object]:
         },
         "corporate_actions": corp_actions_summary(conn),
         "fundamentals": fundamentals_summary(conn),
+        "vcp": vcp_summary(conn),
     }
 
 
@@ -559,4 +584,63 @@ def fundamentals_summary(conn: sqlite3.Connection) -> dict[str, object]:
         "ratios_rows": ratios,
         "by_status": {s: c for s, c in by_status_rows},
         "last_fetch": last,
+    }
+
+
+
+_VCP_COLS = (
+    "symbol", "close", "pivot", "distance_to_pivot",
+    "technical_score", "vcp_score", "fundamental_score", "readiness_score",
+    "combined_score", "final_score", "decision", "stage", "reasons",
+)
+
+
+def upsert_vcp_candidates(
+    conn: sqlite3.Connection, rows: Iterable[dict[str, object]],
+) -> int:
+    """Insert or replace VCP scan results keyed on (isin, trade_date)."""
+    now = dt.datetime.now().isoformat()
+    payload: list[tuple] = []
+    for r in rows:
+        isin = r.get("isin")
+        td = r.get("trade_date")
+        if not isin or not td:
+            continue
+        td_iso = td.isoformat() if hasattr(td, "isoformat") else str(td)
+        payload.append((
+            isin, td_iso, *[r.get(c) for c in _VCP_COLS], now,
+        ))
+    if not payload:
+        return 0
+    cols = ", ".join(("isin", "trade_date", *_VCP_COLS, "computed_at"))
+    placeholders = ", ".join(["?"] * (len(_VCP_COLS) + 3))
+    updates = ", ".join(f"{c} = excluded.{c}" for c in (*_VCP_COLS, "computed_at"))
+    conn.executemany(
+        f"INSERT INTO vcp_candidates ({cols}) VALUES ({placeholders}) "
+        f"ON CONFLICT(isin, trade_date) DO UPDATE SET {updates}",
+        payload,
+    )
+    return len(payload)
+
+
+def vcp_summary(conn: sqlite3.Connection) -> dict[str, object]:
+    total = conn.execute("SELECT COUNT(*) FROM vcp_candidates").fetchone()[0]
+    by_decision_rows = conn.execute(
+        "SELECT decision, COUNT(*) FROM vcp_candidates "
+        "GROUP BY decision ORDER BY decision"
+    ).fetchall()
+    last_date = conn.execute(
+        "SELECT MAX(trade_date) FROM vcp_candidates"
+    ).fetchone()[0]
+    last_total = 0
+    if last_date:
+        last_total = conn.execute(
+            "SELECT COUNT(*) FROM vcp_candidates WHERE trade_date = ?",
+            (last_date,),
+        ).fetchone()[0]
+    return {
+        "total": total,
+        "by_decision": {d: c for d, c in by_decision_rows},
+        "latest_scan_date": last_date,
+        "latest_scan_rows": last_total,
     }
