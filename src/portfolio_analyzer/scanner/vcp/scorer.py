@@ -9,7 +9,8 @@ Four stages per candidate:
 All scores are decimals in [0, 1] unless otherwise noted.
 
 Lifecycle states (mutually exclusive, priority-ordered):
-    EXTENDED > BREAKOUT > READY > CONTRACTING > BASE_BUILDING > TREND > NONE.
+    EXTENDED > BREAKOUT > READY > EARLY_READY > CONTRACTING >
+    BASE_BUILDING > TREND > NONE.
 Stage-1/2 hard-fail short-circuits to ``stage=FAIL`` / ``decision=REJECT``.
 """
 from __future__ import annotations
@@ -50,12 +51,21 @@ RS_BOOST_MAX = 0.20            # combined *= (1 + 0.2 * min(rs,1)) when rs > 0
 # RS boost gate (applies to combined_score, not to state detection)
 WATCHLIST_VCP = 0.40
 
-# State-machine thresholds (D-S23; CONTRACTING/READY relaxed D-S24)
+# State-machine thresholds (D-S23; CONTRACTING/READY relaxed D-S24;
+# READY further relaxed + EARLY_READY added D-S28)
 STATE_READY_VCP = 0.50
 STATE_READY_PIVOT = 0.50
-STATE_READY_RANGE_20D = 0.08
-STATE_READY_STD5 = 0.010
+STATE_READY_RANGE_20D = 0.12        # D-S28: was 0.08
+STATE_READY_STD5 = 0.015            # D-S28: was 0.010
 STATE_READY_DIST_BELOW = -0.03
+# EARLY_READY: same coil-quality gates as READY, but price still 2–6% below
+# the pivot (coil is in, breakout has not arrived yet).
+STATE_EARLY_READY_VCP = 0.50
+STATE_EARLY_READY_PIVOT = 0.50
+STATE_EARLY_READY_RANGE_20D = 0.12
+STATE_EARLY_READY_STD5 = 0.015
+STATE_EARLY_READY_DIST_LO = -0.06
+STATE_EARLY_READY_DIST_HI = -0.02
 STATE_CONTRACTING_VCP = 0.45
 STATE_CONTRACTING_CONTRACTION = 0.0    # sub-score must exceed this
 STATE_CONTRACTING_VOLATILITY = 0.40
@@ -74,6 +84,7 @@ STATE_EXTENDED_EMA50_DIST = 0.15
 
 STATE_TO_DECISION: dict[str, str] = {
     "READY": "BUY_ALERT",
+    "EARLY_READY": "WATCHLIST",
     "CONTRACTING": "WATCHLIST",
     "BASE_BUILDING": "IGNORE",
     "TREND": "IGNORE",
@@ -281,7 +292,8 @@ def _detect_state(
 ) -> str:
     """Classify lifecycle stage. Priority-ordered; first match wins.
 
-    EXTENDED > BREAKOUT > READY > CONTRACTING > BASE_BUILDING > TREND > NONE.
+    EXTENDED > BREAKOUT > READY > EARLY_READY > CONTRACTING >
+    BASE_BUILDING > TREND > NONE.
     """
     d = t.distance_to_pivot
     r20 = t.range_20d
@@ -308,6 +320,17 @@ def _detect_state(
             and t.close_std_5_norm is not None
             and t.close_std_5_norm < STATE_READY_STD5):
         return "READY"
+
+    # EARLY_READY (D-S28): coil in place but price still 2–6% below pivot.
+    # Same tightness gates as READY; only the distance band differs.
+    if (vcp >= STATE_EARLY_READY_VCP
+            and d is not None
+            and STATE_EARLY_READY_DIST_LO <= d <= STATE_EARLY_READY_DIST_HI
+            and parts.get("pivot", 0.0) > STATE_EARLY_READY_PIVOT
+            and r20 is not None and r20 <= STATE_EARLY_READY_RANGE_20D
+            and t.close_std_5_norm is not None
+            and t.close_std_5_norm < STATE_EARLY_READY_STD5):
+        return "EARLY_READY"
 
     # CONTRACTING: valid VCP forming. Gate on vcp_score, then require at least
     # MIN_SUBS of four sub-score conditions — tolerates one weak leg so mid-base
@@ -344,9 +367,9 @@ def score_candidate(
 ) -> ScoreBreakdown:
     """End-to-end scoring; returns decision, stage, and all sub-scores.
 
-    ``stage`` carries the 8-valued lifecycle state (TREND/BASE_BUILDING/
-    CONTRACTING/READY/BREAKOUT/EXTENDED/NONE/FAIL); ``decision`` is the
-    projection via ``STATE_TO_DECISION``.
+    ``stage`` carries the 9-valued lifecycle state (TREND/BASE_BUILDING/
+    CONTRACTING/EARLY_READY/READY/BREAKOUT/EXTENDED/NONE/FAIL);
+    ``decision`` is the projection via ``STATE_TO_DECISION``.
     """
     reasons: list[str] = []
 

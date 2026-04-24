@@ -380,6 +380,46 @@ def test_state_ready_on_coiled_tight_setup():
     assert vs._detect_state(t, 0.60, _parts(pivot=0.75)) == "READY"
 
 
+def test_state_ready_accepts_relaxed_range_and_std_d_s28():
+    """D-S28: READY must now admit range_20d up to 0.12 and std5 up to <0.015
+    (previously capped at 0.08 / 0.010)."""
+    t = replace(
+        _baseline_tech(),
+        range_20d=0.11, distance_to_pivot=-0.02, close_std_5_norm=0.012,
+    )
+    assert vs._detect_state(t, 0.60, _parts(pivot=0.75)) == "READY"
+
+
+def test_state_early_ready_on_coiled_but_below_pivot_d_s28():
+    """D-S28: identical coil quality to READY, but price still 4% below
+    pivot — must classify as EARLY_READY, not CONTRACTING."""
+    t = replace(
+        _baseline_tech(),
+        range_20d=0.08, distance_to_pivot=-0.04, close_std_5_norm=0.010,
+    )
+    assert vs._detect_state(t, 0.60, _parts(pivot=0.75)) == "EARLY_READY"
+
+
+def test_state_ready_beats_early_ready_in_overlap_band_d_s28():
+    """READY band ends at -0.03; EARLY_READY starts at -0.02. In the shared
+    -0.03..-0.02 region READY must win by priority ordering."""
+    t = replace(
+        _baseline_tech(),
+        range_20d=0.08, distance_to_pivot=-0.025, close_std_5_norm=0.010,
+    )
+    assert vs._detect_state(t, 0.60, _parts(pivot=0.75)) == "READY"
+
+
+def test_state_early_ready_rejects_when_price_too_far_below_pivot_d_s28():
+    """D-S28: more than 6% below pivot — EARLY_READY must not fire."""
+    t = replace(
+        _baseline_tech(),
+        range_20d=0.08, distance_to_pivot=-0.08, close_std_5_norm=0.010,
+    )
+    # Falls through to CONTRACTING (vcp gate + sub-score conditions met).
+    assert vs._detect_state(t, 0.60, _parts(pivot=0.75)) != "EARLY_READY"
+
+
 def test_state_contracting_on_valid_vcp():
     # Fails READY (vcp too low, std too high) but passes CONTRACTING rules.
     t = replace(
@@ -433,10 +473,11 @@ def test_state_none_when_no_bucket_fits():
 
 def test_state_to_decision_mapping_is_exhaustive():
     # Every produced state must map to a decision.
-    for state in ("TREND", "BASE_BUILDING", "CONTRACTING", "READY",
-                  "BREAKOUT", "EXTENDED", "NONE", "FAIL"):
+    for state in ("TREND", "BASE_BUILDING", "CONTRACTING", "EARLY_READY",
+                  "READY", "BREAKOUT", "EXTENDED", "NONE", "FAIL"):
         assert state in vs.STATE_TO_DECISION
     assert vs.STATE_TO_DECISION["READY"] == "BUY_ALERT"
+    assert vs.STATE_TO_DECISION["EARLY_READY"] == "WATCHLIST"
     assert vs.STATE_TO_DECISION["CONTRACTING"] == "WATCHLIST"
     assert vs.STATE_TO_DECISION["BASE_BUILDING"] == "IGNORE"
     assert vs.STATE_TO_DECISION["TREND"] == "IGNORE"

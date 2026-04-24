@@ -391,14 +391,16 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
      RS reward-only multiplier: if `rs_score > 0` and `vcp ≥ 0.40`, multiply
      `combined` by `1 + 0.2·min(rs_score, 1)` (capped at 1.2×); non-leaders
      are unchanged. `final = combined · (0.5 + 0.5·readiness)`.
-- **Lifecycle state machine (D-S23):** after scoring, every candidate is
-  classified into exactly one state via `_detect_state()`, priority-ordered:
-  `EXTENDED > BREAKOUT > READY > CONTRACTING > BASE_BUILDING > TREND > NONE`.
+- **Lifecycle state machine (D-S23; `EARLY_READY` added D-S28):** after
+  scoring, every candidate is classified into exactly one state via
+  `_detect_state()`, priority-ordered:
+  `EXTENDED > BREAKOUT > READY > EARLY_READY > CONTRACTING >
+  BASE_BUILDING > TREND > NONE`.
   The state is mapped to a decision via `STATE_TO_DECISION`:
-  `READY → BUY_ALERT`, `CONTRACTING → WATCHLIST`,
+  `READY → BUY_ALERT`, `EARLY_READY | CONTRACTING → WATCHLIST`,
   `BASE_BUILDING|TREND|NONE → IGNORE`, `BREAKOUT|EXTENDED → SKIP`.
   Stage-1/2 hard-fails short-circuit to `stage=FAIL`, `decision=REJECT`.
-  The `stage` column now carries the 8-valued lifecycle state.
+  The `stage` column now carries the 9-valued lifecycle state.
 - `scanner/vcp/scan.py` — orchestrator: pulls last 320 adjusted bars per ISIN
   via `adjusted_market_data`, skips rows with < 252 bars of history, and
   upserts results into `vcp_candidates(isin, trade_date)`. By default only

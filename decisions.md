@@ -1344,3 +1344,74 @@ rally couldn't be re-joined. Two targeted changes:
 - **Out of scope:** volume-at-pivot absolute levels, relative-volume vs.
   sector, turnover-ratio-based dry-up — these require additional feature
   fields and belong to a later ADR.
+
+
+### D-S28. Relax READY + introduce EARLY_READY lifecycle state
+- **Decision:** Loosen the `READY` coil-quality gates and introduce a new
+  `EARLY_READY` state between `READY` and `CONTRACTING` in the
+  priority-ordered state machine. New priority:
+  `EXTENDED > BREAKOUT > READY > EARLY_READY > CONTRACTING >
+   BASE_BUILDING > TREND > NONE`.
+- **READY changes:**
+  - `STATE_READY_RANGE_20D`: `0.08 → 0.12`.
+  - `STATE_READY_STD5`: `0.010 → 0.015`.
+  - `STATE_READY_DIST_BELOW` unchanged at `-0.03` (READY remains
+    "price is at / just under the pivot").
+  - `STATE_READY_VCP` and `STATE_READY_PIVOT` unchanged (0.50 / 0.50).
+- **EARLY_READY gates (new):**
+  - `vcp ≥ 0.50` (same as READY — coil quality must be real).
+  - `pivot_score > 0.50` (same as READY).
+  - `range_20d ≤ 0.12`, `close_std_5_norm < 0.015` (same as relaxed READY).
+  - `-0.06 ≤ distance_to_pivot ≤ -0.02` — the *only* dimension that
+    differs from READY. Price is 2–6% below pivot: coil is in, breakout
+    has not arrived.
+- **Decision projection:** `EARLY_READY → WATCHLIST`. Keeps the alerting
+  surface conservative: only `READY` (price at pivot) produces
+  `BUY_ALERT`. `EARLY_READY` sits alongside `CONTRACTING` in the
+  WATCHLIST bucket so these names appear on the dashboard but do not
+  trigger a buy alert.
+- **Rationale:** the pre-D-S28 `READY` gates (range ≤ 8%, std < 1%) were
+  calibrated tight enough that most real NSE bases — which trade 8–12%
+  peak-to-trough and show 1.0–1.5% 5-day stdev at the tail of a
+  contraction — never cleared them, so the scanner leaned toward
+  mid-base `CONTRACTING` and skipped over legitimate setups within a
+  day or two of their pivot. Relaxing the range/std caps to 12% / 1.5%
+  admits those setups. Separately, analysts commonly want to see names
+  that are *almost* at their pivot — `EARLY_READY` carves out the
+  2–6%-below band as its own addressable stage without polluting the
+  `BUY_ALERT` feed.
+- **Overlap handling:** READY covers `[-0.03, 0.0]`, EARLY_READY covers
+  `[-0.06, -0.02]`. In the shared `[-0.03, -0.02]` band priority ordering
+  ensures READY wins. Both states use strict-less comparisons on
+  `close_std_5_norm` so a value of exactly `0.015` fails both.
+- **Code changes (`scanner/vcp/scorer.py`):**
+  - New constants `STATE_EARLY_READY_*` (6 of them).
+  - `_detect_state` gains an EARLY_READY branch between the READY branch
+    and the CONTRACTING branch.
+  - `STATE_TO_DECISION` gains `"EARLY_READY": "WATCHLIST"`.
+  - Docstrings in the module header and `score_candidate` updated to the
+    9-valued vocabulary and new priority.
+- **Tests (4 new, 50 in `test_scanner_vcp.py` / 280 total):**
+  - `test_state_ready_accepts_relaxed_range_and_std_d_s28` — pins the
+    new READY caps (`range_20d = 0.11`, `std5 = 0.012`).
+  - `test_state_early_ready_on_coiled_but_below_pivot_d_s28` — same
+    coil as READY but `d = -0.04` → `EARLY_READY`.
+  - `test_state_ready_beats_early_ready_in_overlap_band_d_s28` —
+    `d = -0.025` must resolve to READY by priority.
+  - `test_state_early_ready_rejects_when_price_too_far_below_pivot_d_s28`
+    — `d = -0.08` must not classify as EARLY_READY.
+  - `test_state_to_decision_mapping_is_exhaustive` extended to cover the
+    new state.
+- **Compatibility:**
+  - `vcp_candidates.stage` now admits `"EARLY_READY"` in addition to
+    the existing 8 values. No DDL change; column is `TEXT`.
+  - Dashboard (`scanner_loader.DASH_DECISIONS_*`, `scanner_views`) filters
+    by `decision` (BUY_ALERT/WATCHLIST/…), not by `stage`, so no TUI
+    change is required — EARLY_READY rows simply appear in the WATCHLIST
+    bucket alongside CONTRACTING.
+  - Reason-strings include `state=EARLY_READY` naturally via the existing
+    `reasons.append(f"state={state}")` line.
+- **Out of scope:** a dedicated `EARLY_BUY_ALERT` decision tier, plot
+  styling for EARLY_READY on the TUI, or re-tuning the CONTRACTING gates
+  — the EARLY_READY band sits entirely above CONTRACTING's floor so no
+  compensating change is needed there.
