@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,8 @@ from portfolio_analyzer import cli
 from portfolio_analyzer.scanner import db as sdb
 from portfolio_analyzer.scanner.bhavcopy import BhavRow
 from portfolio_analyzer.scanner.vcp import features as vf
+from portfolio_analyzer.scanner.vcp import scorer as vs
+from portfolio_analyzer.scanner.vcp.features import TechnicalFeatures
 from portfolio_analyzer.scanner.vcp.fundamentals import FundamentalFeatures
 from portfolio_analyzer.scanner.vcp.scan import scan_date
 from portfolio_analyzer.scanner.vcp.scorer import score_candidate
@@ -159,6 +162,126 @@ def test_score_watchlist_for_noisy_uptrend():
     assert r.decision in {"WATCHLIST", "REJECT"}
     if r.decision == "WATCHLIST":
         assert r.stage in {"BUILDING", "CONTRACTING"}
+
+
+# ---------- scorer sub-score unit tests (targeted per-rule) ----------
+
+def _baseline_tech() -> TechnicalFeatures:
+    """Passes stage-1 and gives non-zero sub-scores. Override per test."""
+    return TechnicalFeatures(
+        close=100.0, ema50=95.0, ema200=80.0, ema50_slope_20d=0.03,
+        atr14=2.0, atr50=2.5, atr5_recent=1.5, atr30_trailing=2.5,
+        return_1y=0.40, return_3m=0.10, return_20d=0.05,
+        high_52w=105.0, low_52w=70.0, distance_from_52w_high=-0.05,
+        avg_volume_20d=80_000.0, avg_volume_50d=100_000.0,
+        volume_last_50d=tuple([100_000.0] * 50),
+        avg_turnover_20d_cr=5.0, range_20d=0.08,
+        pivot=100.0, pivot_range=0.04, distance_to_pivot=0.0,
+        pivot_touches=3, close_std_5_norm=0.01, volume_slope_20d=-0.01,
+        swing_highs=((50, 115.0), (100, 110.0), (150, 105.0)),
+        swing_lows=((60, 100.0), (110, 99.0), (160, 100.0)),
+    )
+
+
+def test_contraction_requires_strict_tightening():
+    # r0=15, r1=11, r2=5 → both transitions tighten → positive
+    t = _baseline_tech()
+    strict = vs._contraction_score(t)
+    assert strict > 0.0
+
+    # r0=15, r1=11, r2=12 → only first transition tightens → 0
+    partial = replace(
+        t,
+        swing_highs=((50, 115.0), (100, 110.0), (150, 112.0)),
+        swing_lows=((60, 100.0), (110, 99.0), (160, 100.0)),
+    )
+    assert vs._contraction_score(partial) == 0.0
+
+
+def test_volatility_dead_stock_gate_zeroes_out():
+    t = _baseline_tech()
+    assert vs._volatility_score(t) > 0.0
+    dead = replace(t, return_20d=0.01)  # below MIN_MOMENTUM_20D
+    assert vs._volatility_score(dead) == 0.0
+
+
+def test_volume_score_rewards_recent_below_50d_median():
+    t = _baseline_tech()  # 20d avg (80k) below uniform 100k pool
+    score_quiet = vs._volume_score(t)
+    loud = replace(t, avg_volume_20d=150_000.0)
+    score_loud = vs._volume_score(loud)
+    assert score_quiet > score_loud
+
+
+def test_pivot_score_halved_when_touches_below_threshold():
+    t = _baseline_tech()
+    full = vs._pivot_score(t)
+    weak = replace(t, pivot_touches=1)
+    assert vs._pivot_score(weak) == pytest.approx(full * 0.5)
+
+
+def test_structure_shakeout_bonus_on_undercut_recovery():
+    # l0=95, l1=98, l2=96 (< l1), close (100) > l1 → 0.5 + SHAKEOUT_BONUS
+    t = replace(
+        _baseline_tech(),
+        swing_lows=((60, 95.0), (110, 98.0), (160, 96.0)),
+    )
+    assert vs._structure_score(t) == pytest.approx(0.5 + vs.SHAKEOUT_BONUS)
+
+
+def test_breakout_pressure_bonus_applied_when_closes_tight():
+    tight = replace(_baseline_tech(), close_std_5_norm=0.001)
+    _, parts = vs._vcp_score(tight)
+    assert "breakout_pressure" in parts
+
+    loose = replace(_baseline_tech(), close_std_5_norm=0.02)
+    _, parts_loose = vs._vcp_score(loose)
+    assert "breakout_pressure" not in parts_loose
+
+
+def test_readiness_bands_asymmetric():
+    # 2% below → 1 - 0.02/0.05 = 0.6
+    below = replace(_baseline_tech(), distance_to_pivot=-0.02)
+    assert vs._readiness_score(below) == pytest.approx(0.6)
+    # 2% above → 1 - 0.02/0.02 = 0.0 (tighter band)
+    above = replace(_baseline_tech(), distance_to_pivot=+0.02)
+    assert vs._readiness_score(above) == pytest.approx(0.0)
+
+
+# ---------- decision-ladder + RS-boost gating ----------
+
+def test_rs_boost_applied_only_when_vcp_clears_gate():
+    close, high, low, vol = _tight_vcp_series()
+    t = vf.compute_technical_features(close, high, low, close, vol)
+    base = score_candidate(t, _strong_fundamentals(), rs_score=None)
+    leader = score_candidate(t, _strong_fundamentals(), rs_score=0.5)
+    # Tight VCP fixture → vcp >= gate → boost applied.
+    assert any("rs_boost" in r for r in leader.reasons)
+    assert leader.final_score > base.final_score
+
+
+def test_rs_boost_skipped_on_negative_rs():
+    close, high, low, vol = _tight_vcp_series()
+    t = vf.compute_technical_features(close, high, low, close, vol)
+    laggard = score_candidate(t, _strong_fundamentals(), rs_score=-0.3)
+    assert not any("rs_boost" in r for r in laggard.reasons)
+
+
+def test_decision_requires_minimum_vcp_even_with_high_tech_and_rs():
+    # Smooth uptrend → no swing structure / contraction → vcp ~ 0
+    rng = np.random.default_rng(2)
+    n = 400
+    close = np.linspace(100.0, 200.0, n) + rng.normal(0, 0.3, n)
+    t = vf.compute_technical_features(
+        close, close + 0.5, close - 0.5, close, np.full(n, 1_000_000.0),
+    )
+    r = score_candidate(t, _strong_fundamentals(), rs_score=0.9)
+    assert r.vcp_score is not None and r.vcp_score < vs.WATCHLIST_VCP
+    assert r.decision == "REJECT"
+    assert r.stage == "STAGE3_FAIL"
+    # RS boost must not be recorded either (gated on vcp >= WATCHLIST_VCP).
+    assert not any("rs_boost" in x for x in r.reasons)
+
 
 
 # ---------- orchestrator + CLI ----------
