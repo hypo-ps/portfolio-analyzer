@@ -250,8 +250,8 @@ def score_candidate(
     vcp, parts = _vcp_score(t)
     readiness = _readiness_score(t)
     combined = 0.5 * vcp + 0.3 * tech + 0.2 * fund
-    # RS reward-only boost: leaders get up to +20% on combined, non-leaders unchanged.
-    if rs_score is not None and rs_score > 0:
+    # RS reward-only boost — only amplifies real VCP setups, never rescues weak ones.
+    if (rs_score is not None and rs_score > 0 and vcp >= WATCHLIST_VCP):
         boost = 1.0 + RS_BOOST_MAX * min(rs_score, 1.0)
         combined *= boost
         reasons.append(f"rs_boost={boost:.3f}")
@@ -260,13 +260,15 @@ def score_candidate(
 
     reasons.extend(f"{k}={v:.2f}" for k, v in parts.items())
 
-    if (final >= BUY_FINAL
+    has_vcp = vcp >= WATCHLIST_VCP
+    if (has_vcp
+            and final >= BUY_FINAL
             and t.distance_to_pivot is not None
             and abs(t.distance_to_pivot) <= BUY_PIVOT_BAND):
         decision, stage = "BUY_ALERT", "READY"
-    elif final >= WATCHLIST_FINAL:
+    elif has_vcp and final >= WATCHLIST_FINAL:
         decision, stage = "WATCHLIST", "BUILDING"
-    elif vcp >= WATCHLIST_VCP:
+    elif has_vcp:
         decision, stage = "WATCHLIST", "CONTRACTING"
     else:
         decision, stage = "REJECT", "STAGE3_FAIL"
