@@ -1771,3 +1771,164 @@ rally couldn't be re-joined. Two targeted changes:
   to later ADRs.
 
 
+
+### D-S33. Sector-strength context modifier on VCP scoring
+- **Decision:** Compute sector strength once per `scan_date` call, then
+  use it to (a) boost `final_score` of structurally healthy setups in
+  leading sectors and (b) demote `BUY_ALERT` rows in lagging sectors
+  to `WATCHLIST`. The score is the pipeline's first piece of
+  cross-universe context; every earlier feature was per-stock.
+  - `_compute_sector_strength(rows)` returns `sector -> score ∈ [0, 1]`.
+    Inputs are the lightweight per-stock tuple collected in pass 1
+    (`sector`, `return_50d`, `return_20d`, `return_3m`, `ema50`,
+    `ema200`, `close`). Stocks with `sector is None` are dropped.
+  - **Relative-strength component** (weight 0.7 after normalization):
+    per sector, `rs = 0.5·(med50 − idx50) + 0.3·(med20 − idx20)
+    + 0.2·(med3m − idx3m)` where `idx*` is the cross-universe median
+    over the same window. Medians — not means — so a single
+    multibagger or crash can't skew the sector. RS is min-max
+    normalized across sectors to `[0, 1]`; a lone sector collapses
+    to the midpoint (span = 1.0 guard).
+  - **Breadth component** (weight 0.3): `0.6·(% above EMA50)
+    + 0.4·(% above EMA200)`. Breadth is already bounded `[0, 1]` so
+    it is blended as-is with normalized RS.
+  - **Application gates (in `scan_date`, second pass):**
+    - `stage ∈ {READY, CONTRACTING, EARLY_READY}` → multiplicative
+      boost `final_score *= 1 + SECTOR_BOOST_MAX · sector_score`
+      (default `SECTOR_BOOST_MAX = 0.15`; max +15% on a
+      cross-universe #1 sector). Reason `sector_boost=<k>` appended.
+    - `sector_score < SECTOR_DOWNGRADE_CUTOFF` (default `0.30`) AND
+      `decision == "BUY_ALERT"` → decision demoted to `WATCHLIST`
+      with reason `weak_sector_downgrade`. `final_score` untouched.
+    - Missing / unranked sector → no boost, no demotion (neutral).
+  - **Persistence:** two new `vcp_candidates` columns
+    `sector` (TEXT) + `sector_score` (REAL). Existing DBs migrate
+    via `_COLUMN_MIGRATIONS`; the dashboard exposes both via
+    `CandidateRow.sector_score` and a new `SecScore` table column.
+  - **Config surface:** `SECTOR_BOOST_MAX`, `SECTOR_DOWNGRADE_CUTOFF`,
+    `SECTOR_BOOST_STAGES` live in `portfolio_analyzer.config` so
+    thresholds can be tuned without touching `scan.py`.
+- **Rationale:** perfect per-stock setups in broadly weak sectors
+  historically underperform — the coil resolves downward on sector
+  headwinds regardless of single-name structure. Conversely, early
+  mid-coil names in leading sectors tend to resolve upward before
+  every structural gate is satisfied. The modifier encodes that
+  asymmetry without hard-filtering any row:
+  - Strong sector + clean setup → surfaces faster via boost.
+  - Weak sector + perfect VCP → stays visible as WATCHLIST; the
+    operator still sees the structural setup but won't get an alert
+    that's likely to fail.
+  The stage gate (`READY`/`CONTRACTING`/`EARLY_READY` only) exists
+  to avoid chasing: `BREAKOUT`/`EXTENDED` rows are post-trigger and
+  already reflect sector flow in their own price action; boosting
+  them would amplify late entries.
+- **Threshold choices:**
+  - `SECTOR_BOOST_MAX = 0.15`. A top-decile sector gets +15% on
+    `final_score`; a mid-pack sector gets +7%. Small enough that it
+    cannot promote a structurally weak row past a strong one in a
+    lagging sector, large enough to break ties between similarly
+    scored candidates based on leadership.
+  - `SECTOR_DOWNGRADE_CUTOFF = 0.30`. Targets the bottom ~third of
+    sectors (after min-max normalization the 30th percentile is a
+    reasonable weak-leadership cutoff). The demotion is absolute,
+    not relative, which intentionally lets a "flat" scan with no
+    leadership (every sector near 0.5) emit alerts normally.
+  - Window weights `0.5 / 0.3 / 0.2` for 50d / 20d / 3m. 50d is the
+    primary trend window already used for RS (D-S8); 20d catches
+    recent rotation; 3m provides a medium-term anchor so a sector
+    can't look strong on a 4-week bounce alone.
+  - Breadth weights `0.6 / 0.4` for EMA50 / EMA200 — slightly favors
+    the intermediate trend (matches the `_detect_state` horizon)
+    over the long-term filter.
+  - Blend `0.7 · rs + 0.3 · breadth`. Returns are the dominant signal
+    (sector leadership = outperformance); breadth stabilizes the
+    score so a sector with two runaway stocks and the rest broken
+    doesn't rank as a leader.
+- **Two-pass structure:** `scan_date` was single-pass pre-D-S33
+  (load bars → score → persist). It's now:
+  - Pass 1: load bars, compute features + returns, *defer scoring*.
+    Candidate tuples accumulate in `candidates_temp`; sector inputs
+    accumulate in `sector_inputs`.
+  - After pass 1: `_compute_sector_strength(sector_inputs)` runs
+    once; `_log_sector_leaderboard` emits a single INFO line with
+    top-3 / bottom-3 sectors for quick visibility.
+  - Pass 2: `score_candidate`, apply boost/demotion, persist.
+  The refactor is O(N + S); scoring itself stays O(N). Memory cost
+  is one tuple + one feature dict per stock held across the pass
+  boundary — negligible at NIFTY 500 scale.
+- **What this ADR deliberately does NOT change:**
+  - `score_candidate` body: unchanged. The modifier runs *after*
+    scoring, in `scan_date`, so `score_candidate` stays pure and
+    testable in isolation.
+  - `STATE_TO_DECISION`, `BUY_ALERT` gate (D-S32), fundamental
+    state-aware boost (D-S31): all unchanged.
+  - Stage classification: the boost is gated *by* stage, it doesn't
+    influence stage detection.
+  - `combined_score`: untouched. Only `final_score` receives the
+    multiplicative boost so `combined_score` remains the unmodified
+    VCP+fundamental blend.
+- **Rejected alternatives:**
+  - *Use `industry` instead of `sector`.* Industry is too fragmented
+    in the current fundamentals set — most industries have 1–3
+    stocks, which makes medians meaningless and breadth unstable.
+    Sector is coarse enough to aggregate (typically 20–40 per
+    sector) but fine enough to discriminate leadership.
+  - *Hard-filter weak-sector rows.* Rejected — would drop emerging
+    leaders in rotating-sector cohorts before they get a chance to
+    surface. Demotion to WATCHLIST preserves visibility.
+  - *Mean returns instead of medians.* Rejected — a single extreme
+    mover distorts the sector signal. Medians are the standard
+    robust estimator for skewed distributions.
+  - *Apply the boost to EXTENDED/BREAKOUT.* Rejected — those stages
+    are post-trigger; boosting them systematically promotes late
+    entries and conflicts with the entry-window philosophy of D-S32.
+  - *Make the boost additive on `final_score` instead of
+    multiplicative.* Rejected — additive adjustments distort
+    rankings more at lower score bands (a 0.05 add is 50% on a 0.10
+    score, 5% on a 1.0 score). Multiplicative preserves the
+    ordering semantics of `final_score` as a ratio scale.
+  - *Recompute sector score inside `score_candidate`.* Rejected —
+    O(N²) when every stock re-walks the universe. The two-pass
+    refactor is the minimum restructuring for O(N).
+- **Code changes:**
+  - `scanner/vcp/scan.py`: new `_compute_sector_strength` +
+    `_log_sector_leaderboard`; `scan_date` split into two passes;
+    boost/demotion applied in pass 2; `sector` / `sector_score`
+    written into the persisted row dict.
+  - `scanner/db.py`: `sector` (TEXT) + `sector_score` (REAL) added
+    to `_VCP_COLS` and `_COLUMN_MIGRATIONS["vcp_candidates"]` so
+    existing DBs pick up the columns on next `init_schema`.
+  - `tui/scanner_loader.py`: `CandidateRow.sector_score` + the
+    `SELECT` now pulls `c.sector_score` from `vcp_candidates`.
+  - `tui/scanner_views.py`: `SecScore` column appended to the
+    table; detail pane line gains a `SecScore <val>` field.
+  - `config.py`: `SECTOR_BOOST_MAX`, `SECTOR_DOWNGRADE_CUTOFF`,
+    `SECTOR_BOOST_STAGES` module-level constants.
+- **Tests (4 new, `test_scanner_vcp.py`, 308 total passing):**
+  - `test_compute_sector_strength_ranks_strong_sector_highest` —
+    handcrafted 3-sector universe; asserts
+    `IT > FMCG > METAL` and every score in `[0, 1]`.
+  - `test_compute_sector_strength_ignores_missing_sector` — rows
+    with `sector=None` are excluded from the output dict.
+  - `test_compute_sector_strength_empty_when_no_returns` — empty
+    input and all-None returns both yield `{}`.
+  - `test_scan_date_persists_sector_columns` — `vcp_candidates`
+    exposes readable `sector` / `sector_score` columns after
+    `scan_date` (both `None` when fundamentals are absent).
+- **Compatibility:**
+  - Schema migration is additive; old DBs work read-only until
+    the next `init_schema` call, then pick up the new columns
+    automatically.
+  - Stored rows from earlier scans carry `sector=NULL`,
+    `sector_score=NULL`; they sort alongside new rows by
+    `final_score DESC NULLS LAST`.
+  - A name previously stored as `BUY_ALERT` in a weak sector may
+    appear as `WATCHLIST` in the next scan with reason
+    `weak_sector_downgrade`; its `stage` is unchanged.
+  - Existing dashboards gain the `SecScore` column at the right
+    edge of the table; previous column ordering / keys unchanged.
+- **Out of scope:** industry-level rollups (too fragmented under
+  current fundamentals coverage), time-decayed sector scores
+  (e.g. EMA over prior scans), sector-pair correlation matrices,
+  and any backtest that would quantify the lift in BUY_ALERT
+  hit-rate from the boost + demotion — those belong to later ADRs.
