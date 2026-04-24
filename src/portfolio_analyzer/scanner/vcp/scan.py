@@ -151,11 +151,6 @@ def scan_date(
                 skipped_history += 1
                 continue
             fund = load_fundamental_features(conn, isin)
-            result = score_candidate(tech, fund)
-            by_decision[result.decision] = by_decision.get(result.decision, 0) + 1
-
-            if result.decision == "REJECT" and not store_rejects:
-                continue
 
             ret50: float | None = None
             if closes.size >= RS_WINDOW + 1:
@@ -165,6 +160,12 @@ def scan_date(
             rs_score: float | None = None
             if ret50 is not None and bench_ret50 is not None:
                 rs_score = ret50 - bench_ret50
+
+            result = score_candidate(tech, fund, rs_score=rs_score)
+            by_decision[result.decision] = by_decision.get(result.decision, 0) + 1
+
+            if result.decision == "REJECT" and not store_rejects:
+                continue
 
             rows.append({
                 "isin": isin,
