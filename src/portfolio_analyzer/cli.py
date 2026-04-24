@@ -471,8 +471,50 @@ def scanner_vcp_scan(
         "skipped_history": result.skipped_history,
         "by_decision": result.by_decision,
         "stored": result.stored,
+        "benchmark_index": result.benchmark_index,
+        "benchmark_return_50d": result.benchmark_return_50d,
     }
     sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+
+
+@scanner.command("index-ingest")
+@click.option("--index", "index_symbol", type=click.Choice(["NIFTY500", "NIFTY50"]),
+              default="NIFTY500", help="Index to ingest (default NIFTY500).")
+@click.option("--days", type=int, default=500,
+              help="Trailing window to fetch from yfinance (calendar days).")
+@_db_option
+def scanner_index_ingest(index_symbol: str, days: int, db_path: Path | None) -> None:
+    """Fetch benchmark index daily closes and store them in index_data."""
+    from portfolio_analyzer.scanner.index_ingest import ingest_index
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    result = ingest_index(index_symbol, days=days, db_path=db_path)
+    sys.stdout.write(json.dumps({
+        "index": result.index_symbol,
+        "yf_ticker": result.yf_ticker,
+        "rows_fetched": result.rows_fetched,
+        "rows_upserted": result.rows_upserted,
+        "first_date": result.first_date.isoformat() if result.first_date else None,
+        "last_date": result.last_date.isoformat() if result.last_date else None,
+    }, indent=2) + "\n")
+
+
+@scanner.command("dash")
+@click.option("--date", "date_str", type=str, default=None,
+              help="Trade date to view (YYYY-MM-DD). Default: latest scan.")
+@click.option("--include-rejects", is_flag=True, default=False,
+              help="Include REJECT rows if present (default WATCHLIST + BUY_ALERT).")
+@_db_option
+def scanner_dash(
+    date_str: str | None, include_rejects: bool, db_path: Path | None,
+) -> None:
+    """Launch the Textual VCP scanner dashboard."""
+    from portfolio_analyzer.tui.scanner_dash import run_scanner_dash
+
+    trade_date = dt.date.fromisoformat(date_str) if date_str else None
+    run_scanner_dash(
+        db_path=db_path, trade_date=trade_date, include_rejects=include_rejects,
+    )
 
 
 if __name__ == "__main__":
