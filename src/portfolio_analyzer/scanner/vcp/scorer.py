@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from .features import TechnicalFeatures
 from .fundamentals import FundamentalFeatures
 
@@ -32,7 +34,13 @@ TARGET_ROCE = 0.20
 ATR_COMPRESSION_TARGET = 0.7
 PIVOT_RANGE_MAX = 0.08
 RANGE_20D_MAX = 0.20
-READINESS_BAND = 0.05          # |dist_to_pivot| <= 5% → full readiness
+READINESS_BAND = 0.05          # |dist_to_pivot| <= 5% → full readiness (symmetric, pre-B4)
+MIN_MOMENTUM_20D = 0.02        # |return_20d| floor to avoid dead-stock volatility
+MIN_PIVOT_TOUCHES = 2          # closes within 2% of pivot required for full pivot score
+BREAKOUT_PRESSURE_MAX_STD = 0.005   # std(close_5)/close below this → +0.05 VCP bonus
+BREAKOUT_PRESSURE_BONUS = 0.05
+SHAKEOUT_BONUS = 0.10
+RS_BOOST_MAX = 0.20            # combined *= (1 + 0.2 * min(rs,1)) when rs > 0
 
 # Decision thresholds
 BUY_FINAL = 0.75
@@ -120,7 +128,7 @@ def _fundamental_score(f: FundamentalFeatures) -> float:
 
 
 def _contraction_score(t: TechnicalFeatures) -> float:
-    """Each successive swing-high ranges should be tighter than the prior."""
+    """Sequential tightening required: each swing range must be tighter than the prior."""
     if len(t.swing_highs) < 3 or len(t.swing_lows) < 3:
         return 0.0
     h = [p for _, p in t.swing_highs[-3:]]
@@ -128,15 +136,16 @@ def _contraction_score(t: TechnicalFeatures) -> float:
     r = [h[i] - low[i] for i in range(3)]
     if r[0] <= 0:
         return 0.0
-    ok12 = r[1] < r[0]
-    ok23 = r[2] < r[1]
-    shrink = 1.0 - r[2] / r[0] if r[0] > 0 else 0.0
-    return _clamp((0.4 * ok12 + 0.4 * ok23 + 0.2 * shrink))
+    if not (r[1] < r[0] and r[2] < r[1]):
+        return 0.0
+    return _clamp(1.0 - r[2] / r[0])
 
 
 def _volatility_score(t: TechnicalFeatures) -> float:
     if not t.atr5_recent or not t.atr30_trailing:
         return 0.0
+    if t.return_20d is None or abs(t.return_20d) < MIN_MOMENTUM_20D:
+        return 0.0  # dead stock: compression without prior movement is not VCP
     ratio = t.atr5_recent / t.atr30_trailing
     # ratio 0.7 → 1.0; 1.0 → 0.0; linear in between, clamped.
     return _clamp((1.0 - ratio) / (1.0 - ATR_COMPRESSION_TARGET))
@@ -144,12 +153,14 @@ def _volatility_score(t: TechnicalFeatures) -> float:
 
 def _volume_score(t: TechnicalFeatures) -> float:
     slope_part = _clamp(-(t.volume_slope_20d or 0.0) * 20.0)
-    ratio_part = 0.5
-    if t.avg_volume_20d and t.avg_volume_50d and t.avg_volume_50d > 0:
-        ratio = t.avg_volume_20d / t.avg_volume_50d
-        # <=0.8 → 1.0; >=1.2 → 0.0
-        ratio_part = _clamp((1.2 - ratio) / 0.4)
-    return 0.6 * slope_part + 0.4 * ratio_part
+    pct_part = 0.5
+    if t.avg_volume_20d is not None and t.volume_last_50d:
+        arr = np.asarray(t.volume_last_50d, dtype=float)
+        if arr.size > 0:
+            # Fraction of 50-day daily volumes at or below the recent 20d mean.
+            pct = float(np.mean(arr <= t.avg_volume_20d))
+            pct_part = _clamp(1.0 - pct)
+    return 0.5 * slope_part + 0.5 * pct_part
 
 
 def _structure_score(t: TechnicalFeatures) -> float:
@@ -164,7 +175,11 @@ def _structure_score(t: TechnicalFeatures) -> float:
 def _pivot_score(t: TechnicalFeatures) -> float:
     if t.pivot_range is None:
         return 0.0
-    return _clamp(1.0 - t.pivot_range / PIVOT_RANGE_MAX)
+    score = _clamp(1.0 - t.pivot_range / PIVOT_RANGE_MAX)
+    # Strong pivots are retested: halve the score if closes haven't revisited it.
+    if t.pivot_touches is not None and t.pivot_touches < MIN_PIVOT_TOUCHES:
+        score *= 0.5
+    return score
 
 
 def _range_score(t: TechnicalFeatures) -> float:
