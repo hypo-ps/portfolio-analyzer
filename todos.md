@@ -91,6 +91,13 @@ VCP detection and fundamentals remain out of scope for this slice.
       `scanner dash`. Sortable candidates table joined with
       `fundamentals_meta` + per-row drilldown pane. Toggle include-rejects
       at runtime (`r`); sort by cursored column (`s`).
+- [x] VCP scorer rewrite (D-S22): strict contraction, dead-stock volatility
+      gate, percentile-rank volume, pivot-touches halving, shakeout +
+      breakout-pressure bonuses, rebalanced weights (0.28/0.20/0.15/0.17/
+      0.15/0.05), VCP-led blend (0.5·vcp + 0.3·tech + 0.2·fund), asymmetric
+      readiness (5% below / 2% above pivot), reward-only RS multiplier
+      (up to +20%, gated on `vcp ≥ 0.40`), hard decision gate on
+      `vcp ≥ 0.40`. 10 targeted unit tests added (260 total passing).
 - [ ] VCP BUY_ALERT confirmation window — require a ≥1-bar breakout above
       pivot on above-average volume before promoting READY → CONFIRMED.
 - [ ] VCP backtest harness: replay `scanner vcp-scan` per trade date across

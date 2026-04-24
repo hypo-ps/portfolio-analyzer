@@ -352,14 +352,15 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
     fetched_at)` — per-symbol outcome, drives the freshness skip.
 - Money columns store rupees crore; percentages store decimals (28% → 0.28).
 
-### VCP scanner (D-S16/D-S17/D-S18/D-S19)
+### VCP scanner (D-S16/D-S17/D-S18/D-S19, rewritten in D-S22)
 
 - `scanner/vcp/features.py` — reads adjusted OHLCV and returns a
   `TechnicalFeatures` dataclass: EMA50/200 + 20d slope, ATR14/50,
-  ATR5/ATR30 compression, 1y / 3m returns, 52w band and distance,
-  avg-volume/turnover (20d/50d), 20d normalized range, 10-bar close pivot
-  with distance, 20-bar log-volume slope, and the last three 5-bar fractal
-  swing highs / lows.
+  ATR5/ATR30 compression, 1y / 3m / 20d returns, 52w band and distance,
+  avg-volume/turnover (20d/50d), per-bar 50d volume vector, 20d normalized
+  range, 10-bar close pivot with distance, 5-bar close-std (normalized),
+  pivot-touch count (closes within 2% of pivot), 20-bar log-volume slope,
+  and the last three 5-bar fractal swing highs / lows.
 - `scanner/vcp/fundamentals.py` — per-ISIN `FundamentalFeatures` from
   `fundamentals_meta` + `financials_annual`: sector, market-cap, PE, ROE,
   ROCE, YoY and 3y/5y revenue CAGR, 3y profit CAGR, D/E from the latest
@@ -370,15 +371,26 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
      within 25% of 52w high.
   2. **Stage-2 fundamentals:** hard-reject ROE < 10% or D/E > 2.0;
      `fundamental_score` = 0.35·growth + 0.25·ROE + 0.20·ROCE + 0.20·D/E.
-  3. **Stage-3 VCP sub-scores** (weights): contraction 0.25, volatility 0.20,
-     volume 0.15, structure 0.15, pivot 0.15, range 0.10 → `vcp_score ∈ [0,1]`.
-  4. **Readiness + final:** `readiness = 1 − |dist_to_pivot|/0.05` clamped;
-     `combined = 0.7·(0.5·tech + 0.5·vcp) + 0.3·fund`; `final = combined ·
-     (0.5 + 0.5·readiness)`.
-- **Decision ladder:** `BUY_ALERT/READY` if `final ≥ 0.75` and within 2% of
-  pivot; `WATCHLIST/BUILDING` if `final ≥ 0.55`; `WATCHLIST/CONTRACTING` if
-  `vcp ≥ 0.40`; else `REJECT/STAGE3_FAIL`. Stage-1/2 hard-fails short-circuit
-  to `REJECT/STAGE1_FAIL | STAGE2_FAIL`.
+  3. **Stage-3 VCP sub-scores** (weights): contraction 0.28, volatility 0.20,
+     volume 0.15, structure 0.17, pivot 0.15, range 0.05 → `vcp_score ∈ [0,1]`.
+     Contraction requires **both** swing transitions to tighten (partial
+     contraction → 0). Volatility zeroes out if `|return_20d| < 2%`
+     (dead-stock gate). Volume uses a 50d-percentile of recent vs. pool.
+     Pivot score is **halved** if fewer than 2 closes sat within 2% of pivot.
+     Structure adds a +0.10 shakeout bonus when the final swing-low undercuts
+     the prior low but price has recovered above it. A +0.05 breakout-pressure
+     bonus applies when the 5-bar close std (normalized) is < 0.005.
+  4. **Readiness + final:** asymmetric band — 5% below pivot, 2% above
+     (late entries punished faster): `readiness = 1 − |dist|/band` clamped.
+     `combined = 0.5·vcp + 0.3·tech + 0.2·fund`.
+     RS reward-only multiplier: if `rs_score > 0` and `vcp ≥ 0.40`, multiply
+     `combined` by `1 + 0.2·min(rs_score, 1)` (capped at 1.2×); non-leaders
+     are unchanged. `final = combined · (0.5 + 0.5·readiness)`.
+- **Decision ladder (gated on `vcp ≥ 0.40`):** without the VCP gate the
+  decision is `REJECT/STAGE3_FAIL` regardless of tech/fund/RS.
+  If gated: `BUY_ALERT/READY` when `final ≥ 0.75` and within 2% of pivot;
+  `WATCHLIST/BUILDING` when `final ≥ 0.55`; else `WATCHLIST/CONTRACTING`.
+  Stage-1/2 hard-fails short-circuit to `REJECT/STAGE1_FAIL | STAGE2_FAIL`.
 - `scanner/vcp/scan.py` — orchestrator: pulls last 320 adjusted bars per ISIN
   via `adjusted_market_data`, skips rows with < 252 bars of history, and
   upserts results into `vcp_candidates(isin, trade_date)`. By default only
@@ -392,10 +404,12 @@ All commands emit JSON on stdout. `ingest` / `ca-ingest` exit 1 on `error`
 - `scanner/index_ingest.py` — fetches daily closes for NIFTY 500 (`^CRSLDX`)
   or NIFTY 50 (`^NSEI`) via the shared `yf_fetch` module and upserts them
   into `index_data(index_symbol, trade_date, close)`.
-- `vcp-scan` now loads `index_data` for NIFTY 500 and computes, per
+- `vcp-scan` loads `index_data` for NIFTY 500 and computes, per
   candidate, `return_50d = close[-1]/close[-51] - 1` and
   `rs_score = return_50d - bench_return_50d`, matching the Phase 0 formula
-  (`stock_analysis.compute_metrics`, `RETURN_WINDOW = 50`).
+  (`stock_analysis.compute_metrics`, `RETURN_WINDOW = 50`). Under D-S22 the
+  `rs_score` is also piped into `score_candidate` as a reward-only multiplier
+  (gated on `vcp ≥ 0.40`).
 - `vcp_candidates` carries three additional columns: `return_50d`,
   `benchmark_return_50d`, `rs_score`. Older DBs are migrated in-place via
   `PRAGMA table_info` + `ALTER TABLE ADD COLUMN` at `init_schema` time.

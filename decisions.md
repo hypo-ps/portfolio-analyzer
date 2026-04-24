@@ -963,3 +963,73 @@ rally couldn't be re-joined. Two targeted changes:
 - **Out of scope for this slice:** per-row PlotextPlot of recent OHLC,
   sector-grouped views, in-dashboard rescan button, export-to-CSV
   action, filter-by-sector/decision widgets.
+
+
+
+## 2026-04-24 — VCP scoring rewrite
+
+### D-S22. VCP scorer rewrite: strict rules, VCP-led blend, gated RS reward
+- **Decision:** Replace the original scorer (D-S17) with a VCP-first
+  formulation whose final decision is always gated on `vcp_score ≥ 0.40`.
+  Scope covers Stage-3 sub-scores, weights, the combined blend, readiness,
+  RS integration, and the decision ladder. Stage-1 and Stage-2 hard filters
+  are unchanged.
+- **Rationale:** Initial live output showed stocks with near-zero VCP
+  patterns (`vcp ≤ 0.11`) passing `WATCHLIST` on the strength of
+  `technical_score` + `fundamental_score` + positive `rs_score` alone.
+  A scanner named "VCP" must not short-list non-VCP setups. The rewrite
+  restores VCP as the primary alpha source and demotes tech / fund / RS
+  to confirmation, filter, and reward respectively.
+- **Feature additions (`TechnicalFeatures`):**
+  - `return_20d` — 20-trading-day return, used to gate "dead stock"
+    volatility false-positives.
+  - `pivot_touches` — count of last-10 closes within ±2% of the 10-bar
+    pivot; strong pivots are retested, weak ones aren't.
+  - `close_std_5_norm` — std of last-5 closes divided by current close;
+    unlocks the breakout-pressure bonus.
+- **Sub-score tightening:**
+  - Contraction requires **both** consecutive swing transitions to tighten
+    (`r2 < r1 < r0`); partial tightening returns `0`.
+  - Volatility returns `0` if `|return_20d| < 2%` (no movement → no
+    compression to speak of).
+  - Volume switches from raw slope to a hybrid of 20-day log-slope + a
+    50-day percentile rank (rewards recent quieting, punishes blow-offs).
+  - Pivot score halves when `pivot_touches < 2` (unretested level).
+- **Enhancements:**
+  - Shakeout bonus of `+0.10` added to `structure` when the final swing-low
+    undercuts the prior low **and** price has already recovered above it.
+  - Breakout-pressure bonus of `+0.05` added to the aggregate `vcp_score`
+    when `close_std_5_norm < 0.005` (coiled-spring signature).
+- **Weights rebalanced** to reflect relative importance of the pattern
+  definition: contraction `0.28`, volatility `0.20`, volume `0.15`,
+  structure `0.17`, pivot `0.15`, range `0.05` (sum = 1.0). Net effect:
+  shift 5 pts off `range` (weakest signal) to contraction and structure.
+- **Blend:** `combined = 0.5·vcp + 0.3·tech + 0.2·fund` — VCP-led, down
+  from the old `0.7·(0.5·tech + 0.5·vcp) + 0.3·fund` which weighted VCP
+  and tech equally.
+- **Asymmetric readiness:** band is `5%` below pivot, `2%` above (late
+  entries punished faster than early ones). Replaces the symmetric 5%
+  `READINESS_BAND` with two constants (`READINESS_BAND_BELOW`,
+  `READINESS_BAND_ABOVE`).
+- **RS as reward-only multiplier:** `combined *= 1 + 0.2·min(rs_score, 1)`
+  when `rs_score > 0` **and** `vcp ≥ 0.40`. Non-leaders and weak-VCP
+  names are unchanged; cap is +20%. No RS penalty is ever applied.
+- **Decision ladder (hard gate on `vcp ≥ 0.40`):**
+  - `REJECT/STAGE3_FAIL` if `vcp < 0.40`, regardless of `final`.
+  - `BUY_ALERT/READY` if gated, `final ≥ 0.75`, within ±2% of pivot.
+  - `WATCHLIST/BUILDING` if gated, `final ≥ 0.55`.
+  - `WATCHLIST/CONTRACTING` otherwise (gated).
+- **Plumbing:** `scan.py` now computes `rs_score` **before**
+  `score_candidate` and passes it through as a keyword arg. Row layout of
+  `vcp_candidates` is unchanged.
+- **Data wipe:** 71 stale `vcp_candidates` rows (scored under the old
+  formula) were deleted from `data/scanner.db` after the rewrite landed;
+  next scan re-populated the table under the new formula.
+- **Observed effect on `2026-04-23` universe (2,288 scored):** candidates
+  dropped from 32 → 16 after the VCP gate was added. All 16 remaining
+  WATCHLIST rows have real contraction / structure / pivot signals; the
+  previous leakers (KRN, QPOWER, NATIONALUM — all `vcp ≤ 0.29`) are now
+  REJECT as expected.
+- **Out of scope:** per-sector VCP weight tuning, forward-test harness,
+  `vcp_score` confidence interval. The scorer remains deterministic and
+  single-threaded; no parameter is learned from data.
