@@ -80,6 +80,11 @@ SCREENER_REQUEST_DELAY_SEC = 2.0
 SCREENER_MAX_RETRIES = 2
 SCREENER_REFRESH_AFTER_DAYS = 7
 
+# VCP sector-strength tuning (applied once per scan; see D-S33)
+SECTOR_BOOST_MAX = 0.15          # final_score *= (1 + this * sector_score)
+SECTOR_DOWNGRADE_CUTOFF = 0.30   # below this, BUY_ALERT → WATCHLIST
+SECTOR_BOOST_STAGES = frozenset({"READY", "CONTRACTING", "EARLY_READY"})
+
 
 @dataclass(frozen=True)
 class Credentials:

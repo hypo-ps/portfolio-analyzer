@@ -34,12 +34,10 @@ logger = logging.getLogger(__name__)
 BARS_LOOKBACK = 320  # enough for EMA200 + 1y return + buffer
 RS_WINDOW = cfg.RETURN_WINDOW  # Phase 0 RS uses 50 trading days
 
-# Sector-strength tuning. Applied once per scan as a multiplicative boost to
-# final_score for READY/CONTRACTING/EARLY_READY rows; weak-sector BUY_ALERTs
-# demote to WATCHLIST so alerts track leadership context.
-SECTOR_BOOST_MAX = 0.15          # final_score *= (1 + 0.15 * sector_score)
-SECTOR_DOWNGRADE_CUTOFF = 0.30   # below this, BUY_ALERT → WATCHLIST
-SECTOR_BOOST_STAGES = frozenset({"READY", "CONTRACTING", "EARLY_READY"})
+# Sector-strength tuning lives in ``portfolio_analyzer.config`` (see D-S33).
+SECTOR_BOOST_MAX = cfg.SECTOR_BOOST_MAX
+SECTOR_DOWNGRADE_CUTOFF = cfg.SECTOR_DOWNGRADE_CUTOFF
+SECTOR_BOOST_STAGES = cfg.SECTOR_BOOST_STAGES
 
 
 @dataclass
@@ -184,6 +182,19 @@ def _compute_sector_strength(
     return out
 
 
+def _log_sector_leaderboard(scores: dict[str, float], *, k: int = 3) -> None:
+    """Log the strongest / weakest ``k`` sectors for quick visibility."""
+    if not scores:
+        return
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    top = ", ".join(f"{s}={v:.2f}" for s, v in ranked[:k])
+    bottom = ", ".join(f"{s}={v:.2f}" for s, v in ranked[-k:][::-1])
+    logger.info(
+        "vcp-scan: sectors=%d top=[%s] bottom=[%s]",
+        len(ranked), top, bottom,
+    )
+
+
 def scan_date(
     trade_date: dt.date,
     *,
@@ -256,6 +267,7 @@ def scan_date(
                 logger.info("vcp-scan: %d/%d processed", idx, len(universe))
 
         sector_scores = _compute_sector_strength(sector_inputs)
+        _log_sector_leaderboard(sector_scores)
 
         # Second pass: score each candidate and apply sector context.
         for isin, symbol, tech, fund, rs_score, ret50 in candidates_temp:

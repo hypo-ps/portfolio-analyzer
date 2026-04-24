@@ -40,7 +40,7 @@ CANDIDATE_COLUMNS: tuple[str, ...] = (
     "Close", "Pivot", "Dist%",
     "Final", "VCP", "Tech", "Fund", "Ready",
     "RS50", "Ret50", "Bench50",
-    "ROE", "ROCE", "PE", "MCap(Cr)", "Sector",
+    "ROE", "ROCE", "PE", "MCap(Cr)", "Sector", "SecScore",
 )
 
 
@@ -65,6 +65,7 @@ def candidate_row_tuple(row: CandidateRow) -> tuple[str, ...]:
         _fmt_num(row.stock_pe, 1),
         _fmt_mcap(row.market_cap_cr),
         row.sector or "--",
+        _fmt_num(row.sector_score, 2),
     )
 
 
@@ -137,7 +138,8 @@ def detail_markup(row: CandidateRow | None) -> str:
         f"ROCE {_fmt_pct(row.roce_latest)}   "
         f"PE {_fmt_num(row.stock_pe, 1)}   "
         f"MCap {_fmt_mcap(row.market_cap_cr)} Cr   "
-        f"Sector {row.sector or '--'}   Industry {row.industry or '--'}",
+        f"Sector {row.sector or '--'}   Industry {row.industry or '--'}   "
+        f"SecScore {_fmt_num(row.sector_score, 2)}",
         "",
         f"[b]Reasons[/]   {reasons}",
     ]
