@@ -50,16 +50,18 @@ RS_BOOST_MAX = 0.20            # combined *= (1 + 0.2 * min(rs,1)) when rs > 0
 # RS boost gate (applies to combined_score, not to state detection)
 WATCHLIST_VCP = 0.40
 
-# State-machine thresholds (D-S23)
-STATE_READY_VCP = 0.55
-STATE_READY_PIVOT = 0.60
+# State-machine thresholds (D-S23; CONTRACTING/READY relaxed D-S24)
+STATE_READY_VCP = 0.50
+STATE_READY_PIVOT = 0.50
 STATE_READY_RANGE_20D = 0.08
 STATE_READY_STD5 = 0.010
-STATE_READY_DIST_BELOW = -0.02
+STATE_READY_DIST_BELOW = -0.03
 STATE_CONTRACTING_VCP = 0.45
-STATE_CONTRACTING_VOLATILITY = 0.50
-STATE_CONTRACTING_VOLUME = 0.50
-STATE_CONTRACTING_RANGE_20D = 0.10
+STATE_CONTRACTING_CONTRACTION = 0.0    # sub-score must exceed this
+STATE_CONTRACTING_VOLATILITY = 0.40
+STATE_CONTRACTING_VOLUME = 0.40
+STATE_CONTRACTING_STRUCTURE = 0.50
+STATE_CONTRACTING_MIN_SUBS = 2         # at least N of 4 sub-score gates must fire
 STATE_BASE_VCP = 0.30
 STATE_BASE_STRUCTURE = 0.30
 STATE_BASE_RANGE_LO = 0.08     # range_20d must be > 0.08 to be BASE (else CONTRACTING)
@@ -290,13 +292,18 @@ def _detect_state(
             and t.close_std_5_norm < STATE_READY_STD5):
         return "READY"
 
-    # CONTRACTING: valid VCP forming — tightening volatility, declining volume.
-    if (vcp >= STATE_CONTRACTING_VCP
-            and parts.get("contraction", 0.0) > 0.0
-            and parts.get("volatility", 0.0) > STATE_CONTRACTING_VOLATILITY
-            and parts.get("volume", 0.0) > STATE_CONTRACTING_VOLUME
-            and r20 is not None and r20 <= STATE_CONTRACTING_RANGE_20D):
-        return "CONTRACTING"
+    # CONTRACTING: valid VCP forming. Gate on vcp_score, then require at least
+    # MIN_SUBS of four sub-score conditions — tolerates one weak leg so mid-base
+    # setups aren't filtered out by a single laggy dimension.
+    if vcp >= STATE_CONTRACTING_VCP:
+        subs_hit = (
+            int(parts.get("contraction", 0.0) > STATE_CONTRACTING_CONTRACTION)
+            + int(parts.get("volatility", 0.0) > STATE_CONTRACTING_VOLATILITY)
+            + int(parts.get("volume", 0.0) > STATE_CONTRACTING_VOLUME)
+            + int(parts.get("structure", 0.0) > STATE_CONTRACTING_STRUCTURE)
+        )
+        if subs_hit >= STATE_CONTRACTING_MIN_SUBS:
+            return "CONTRACTING"
 
     # BASE_BUILDING: early consolidation; looser than CONTRACTING.
     if (r20 is not None
