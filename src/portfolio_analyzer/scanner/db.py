@@ -200,7 +200,30 @@ SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_vcp_date_score ON vcp_candidates(trade_date, final_score DESC)",
     "CREATE INDEX IF NOT EXISTS idx_vcp_decision ON vcp_candidates(decision)",
+    """
+    CREATE TABLE IF NOT EXISTS index_data (
+        index_symbol TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        close REAL NOT NULL,
+        source TEXT NOT NULL DEFAULT 'YF',
+        ingested_at TEXT NOT NULL,
+        PRIMARY KEY (index_symbol, trade_date)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_index_data_date ON index_data(trade_date)",
 ]
+
+
+# Per-table columns that may need adding when upgrading a pre-existing DB.
+# SQLite has no "ADD COLUMN IF NOT EXISTS", so we check PRAGMA and add only
+# missing columns from init_schema.
+_COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "vcp_candidates": [
+        ("return_50d", "REAL"),
+        ("benchmark_return_50d", "REAL"),
+        ("rs_score", "REAL"),
+    ],
+}
 
 
 def default_db_path(data_dir: Path | None = None) -> Path:
@@ -228,6 +251,17 @@ def open_db(db_path: Path) -> Iterator[sqlite3.Connection]:
 def init_schema(conn: sqlite3.Connection) -> None:
     for stmt in SCHEMA:
         conn.execute(stmt)
+    _apply_column_migrations(conn)
+
+
+def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    """Add any columns in ``_COLUMN_MIGRATIONS`` that are missing on existing
+    tables (SQLite has no ``ADD COLUMN IF NOT EXISTS``)."""
+    for table, cols in _COLUMN_MIGRATIONS.items():
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, col_type in cols:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
 
 
 def upsert_stock_master(conn: sqlite3.Connection, rows: Iterable[BhavRow]) -> int:
@@ -332,6 +366,7 @@ def ingestion_summary(conn: sqlite3.Connection) -> dict[str, object]:
         "corporate_actions": corp_actions_summary(conn),
         "fundamentals": fundamentals_summary(conn),
         "vcp": vcp_summary(conn),
+        "indices": index_summary(conn),
     }
 
 
@@ -592,6 +627,7 @@ _VCP_COLS = (
     "symbol", "close", "pivot", "distance_to_pivot",
     "technical_score", "vcp_score", "fundamental_score", "readiness_score",
     "combined_score", "final_score", "decision", "stage", "reasons",
+    "return_50d", "benchmark_return_50d", "rs_score",
 )
 
 
@@ -643,4 +679,62 @@ def vcp_summary(conn: sqlite3.Connection) -> dict[str, object]:
         "by_decision": {d: c for d, c in by_decision_rows},
         "latest_scan_date": last_date,
         "latest_scan_rows": last_total,
+    }
+
+
+def upsert_index_data(
+    conn: sqlite3.Connection,
+    index_symbol: str,
+    rows: Iterable[tuple[dt.date, float]],
+    *,
+    source: str = "YF",
+) -> int:
+    """Insert or replace (index_symbol, trade_date, close) rows."""
+    now = dt.datetime.now().isoformat()
+    payload = [
+        (index_symbol, td.isoformat(), float(close), source, now)
+        for td, close in rows
+        if close is not None and float(close) > 0
+    ]
+    if not payload:
+        return 0
+    conn.executemany(
+        "INSERT INTO index_data (index_symbol, trade_date, close, source, ingested_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(index_symbol, trade_date) DO UPDATE SET "
+        "close = excluded.close, source = excluded.source, "
+        "ingested_at = excluded.ingested_at",
+        payload,
+    )
+    return len(payload)
+
+
+def load_index_closes(
+    conn: sqlite3.Connection, index_symbol: str, *, as_of: dt.date | None = None,
+    lookback: int | None = None,
+) -> list[tuple[dt.date, float]]:
+    """Return (trade_date, close) rows for an index, oldest -> newest."""
+    params: list = [index_symbol]
+    sql = "SELECT trade_date, close FROM index_data WHERE index_symbol = ?"
+    if as_of is not None:
+        sql += " AND trade_date <= ?"
+        params.append(as_of.isoformat())
+    sql += " ORDER BY trade_date"
+    rows = conn.execute(sql, params).fetchall()
+    pairs = [(dt.date.fromisoformat(d), float(c)) for d, c in rows]
+    if lookback is not None and len(pairs) > lookback:
+        pairs = pairs[-lookback:]
+    return pairs
+
+
+def index_summary(conn: sqlite3.Connection) -> dict[str, object]:
+    totals = conn.execute(
+        "SELECT index_symbol, COUNT(*), MIN(trade_date), MAX(trade_date) "
+        "FROM index_data GROUP BY index_symbol ORDER BY index_symbol"
+    ).fetchall()
+    return {
+        "by_index": [
+            {"index": sym, "bars": n, "first": first, "last": last}
+            for sym, n, first, last in totals
+        ],
     }
