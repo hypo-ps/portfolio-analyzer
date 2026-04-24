@@ -86,6 +86,30 @@ def test_find_swings_detects_peak_and_trough():
     assert (3, 0.1) in sl
 
 
+def test_apply_spacing_collapses_close_cluster_to_extreme():
+    """D-S26: adjacent same-type swings inside the spacing window must
+    collapse to the more extreme value. Greedy left-to-right pass."""
+    # Highs: keep the higher of the pair within the spacing window.
+    raw = [(2, 5.0), (6, 4.0), (20, 7.0), (23, 6.5)]
+    filtered = vf._apply_spacing(raw, min_spacing=6, prefer="max")
+    assert filtered == [(2, 5.0), (20, 7.0)]
+    # Lows: keep the lower of the pair within the spacing window.
+    raw_lo = [(2, 1.0), (6, 1.5), (20, 0.5), (23, 0.8)]
+    filtered_lo = vf._apply_spacing(raw_lo, min_spacing=6, prefer="min")
+    assert filtered_lo == [(2, 1.0), (20, 0.5)]
+
+
+def test_find_swings_applies_spacing_filter_end_to_end():
+    """Two fractal-detected swing-highs 4 bars apart must collapse to the
+    higher one after the module-level spacing pass."""
+    highs = np.array([1, 2, 5, 3, 1, 2, 4, 2, 1], dtype=float)
+    lows = np.array([1, 1, 1, 1, 1, 1, 1, 1, 1], dtype=float)
+    sh, _ = vf._find_swings(highs, lows, n=2)
+    # Without spacing we'd see both (2, 5.0) and (6, 4.0); after filter, only
+    # the taller survives because the two sit within SWING_MIN_SPACING bars.
+    assert sh == [(2, 5.0)]
+
+
 def test_compute_technical_features_rejects_short_history():
     arr = np.full(100, 100.0)
     assert vf.compute_technical_features(arr, arr, arr, arr, arr) is None

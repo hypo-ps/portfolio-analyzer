@@ -1242,3 +1242,49 @@ rally couldn't be re-joined. Two targeted changes:
 - **Out of scope:** base-depth feature (structural low since pivot),
   days-since-pivot, volume-at-pivot, Darvas-style box boundary detection,
   base-count (first-base vs. third-base) — these belong to a later ADR.
+
+
+### D-S26. Swing spacing filter — collapse clustered fractals
+- **Decision:** After fractal detection in `_find_swings`, run a greedy
+  non-maximum-suppression pass that collapses adjacent same-type swings
+  closer than `SWING_MIN_SPACING = 6` bars, keeping the more extreme value
+  (higher for highs, lower for lows). Implemented via a new helper
+  `_apply_spacing(swings, min_spacing, *, prefer)`.
+- **Rationale:** The 5-bar fractal rule only enforces that a swing is the
+  extreme of its 11-bar neighbourhood — two swing-highs can still sit 6–10
+  bars apart with different values, and with low fractal-`n` (used in the
+  contraction / structure scorers) even 3–4 bar separation is possible.
+  Without a spacing filter, `swing_highs[-3:]` can collapse into a
+  single-week cluster, which makes `_contraction_score` and
+  `_structure_score` measure intra-cluster noise instead of structural
+  tightening. It also distorts the D-S25 pivot lookup: a minor clustered
+  swing can win over a genuine earlier peak because it is more recent.
+- **Algorithm:** walks the fractal list left-to-right; if the next swing
+  is within `min_spacing` bars of the last accepted swing, keep whichever
+  is more extreme and drop the other. Greedy rather than optimal
+  (a windowed argmax would pick the globally best peak per cluster) —
+  simpler, cheap, and sufficient for the typical 2–3 candidate cluster
+  sizes observed on real bars.
+- **Threshold choice (`6`):** user review specified 5–7 bars; 6 is the
+  middle. Below 5 is dominated by the fractal rule itself (tied values);
+  above 8 starts discarding legitimate secondary swings that contribute to
+  contraction analysis.
+- **Code changes (`scanner/vcp/features.py`):**
+  - New constant `SWING_MIN_SPACING = 6`.
+  - New helper `_apply_spacing(swings, min_spacing, *, prefer)`.
+  - `_find_swings` calls `_apply_spacing` on both `sh` and `sl` before
+    returning; call sites (pivot lookup, `swing_highs`, `swing_lows`) are
+    unchanged — they see filtered lists.
+- **Tests (2 new, total 273):**
+  - `test_apply_spacing_collapses_close_cluster_to_extreme` — direct unit
+    test covering both `prefer='max'` and `prefer='min'` branches.
+  - `test_find_swings_applies_spacing_filter_end_to_end` — synthetic
+    highs with two fractal-detected peaks 4 bars apart; asserts only the
+    taller survives the module-level filter.
+- **Compatibility:** No schema change; stored `vcp_candidates` rows remain
+  valid numerically (they were already scored under fractal output). New
+  scans may produce marginally different `contraction` / `structure`
+  sub-scores on names with previously clustered swings.
+- **Out of scope:** spacing for cross-type adjacency (swing-high next to
+  swing-low), adaptive spacing based on ATR / volatility, optimal
+  windowed-argmax rather than greedy NMS.

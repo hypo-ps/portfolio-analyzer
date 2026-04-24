@@ -19,6 +19,9 @@ import numpy as np
 # Minimum history so EMA200 and 1y return stabilize.
 MIN_BARS = 252
 SWING_FRACTAL_N = 5
+# Minimum bar-distance between adjacent same-type swings (D-S26). Clustered
+# fractal candidates within this window are collapsed to the most extreme one.
+SWING_MIN_SPACING = 6
 # Base window the structural pivot is searched over (≈2 trading months).
 PIVOT_WINDOW = 40
 
@@ -96,6 +99,27 @@ def _wilder(values: np.ndarray, n: int) -> float | None:
     return float(smoothed)
 
 
+def _apply_spacing(
+    swings: list[tuple[int, float]], min_spacing: int, *, prefer: str,
+) -> list[tuple[int, float]]:
+    """Collapse clusters of same-type swings closer than ``min_spacing`` bars,
+    keeping the more extreme value. ``prefer`` is ``'max'`` for highs,
+    ``'min'`` for lows. Walks left-to-right; greedy NMS."""
+    if not swings:
+        return swings
+    out: list[tuple[int, float]] = [swings[0]]
+    for idx, val in swings[1:]:
+        last_idx, last_val = out[-1]
+        if idx - last_idx >= min_spacing:
+            out.append((idx, val))
+            continue
+        if (prefer == "max" and val > last_val) or (
+            prefer == "min" and val < last_val
+        ):
+            out[-1] = (idx, val)
+    return out
+
+
 def _find_swings(
     highs: np.ndarray, lows: np.ndarray, n: int = SWING_FRACTAL_N,
 ) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
@@ -108,6 +132,8 @@ def _find_swings(
             sh.append((i, float(highs[i])))
         if lows[i] == window_lo.min():
             sl.append((i, float(lows[i])))
+    sh = _apply_spacing(sh, SWING_MIN_SPACING, prefer="max")
+    sl = _apply_spacing(sl, SWING_MIN_SPACING, prefer="min")
     return sh, sl
 
 
