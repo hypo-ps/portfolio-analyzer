@@ -167,6 +167,38 @@ def test_pivot_falls_back_to_window_max_without_swing():
     assert t.pivot == pytest.approx(float(closes[-vf.PIVOT_WINDOW:].max()))
 
 
+def test_volume_expansion_3bar_true_when_last_3_avg_over_threshold():
+    """D-S29: mean(vol[-3:]) ≥ 1.3 × avg_volume_20d → True."""
+    n = 260
+    close = np.linspace(100.0, 150.0, n)
+    high = close + 0.5
+    low = close - 0.5
+    vol = np.full(n, 100_000.0)
+    # Last 3 bars at 140k each. avg20 = (17·100k + 3·140k)/20 = 106k;
+    # 3-bar mean / avg20 = 140/106 ≈ 1.32× → crosses 1.3× threshold.
+    vol[-3:] = 140_000.0
+    t = vf.compute_technical_features(close, high, low, close, vol)
+    assert t is not None
+    assert t.volume_expansion_3bar is True
+
+
+def test_volume_expansion_3bar_false_on_single_bar_spike_only():
+    """D-S29: a lone high-volume bar amid quiet bars trips volume_spike
+    but must not pass the 3-bar mean gate."""
+    n = 260
+    close = np.linspace(100.0, 150.0, n)
+    high = close + 0.5
+    low = close - 0.5
+    vol = np.full(n, 100_000.0)
+    vol[-1] = 160_000.0  # last bar alone, 1.55× baseline → volume_spike True
+    t = vf.compute_technical_features(close, high, low, close, vol)
+    assert t is not None
+    # avg20 = (19·100k + 160k)/20 = 103k; last bar 160/103 = 1.55× ≥ 1.5×.
+    assert t.volume_spike is True
+    # 3-bar mean = (100+100+160)/3 = 120k; 120/103 ≈ 1.165 < 1.30 → False.
+    assert t.volume_expansion_3bar is False
+
+
 # ---------- scorer pipeline tests ----------
 
 def test_score_reject_downtrend():
@@ -240,7 +272,8 @@ def _baseline_tech() -> TechnicalFeatures:
         avg_turnover_20d_cr=5.0, range_20d=0.08, range_5d_norm=0.03,
         pivot=100.0, pivot_range=0.04, distance_to_pivot=0.0,
         pivot_touches=3, close_std_5_norm=0.01, volume_slope_20d=-0.01,
-        atr_expanding=False, volume_spike=False, distance_to_ema50=0.05,
+        atr_expanding=False, volume_spike=False,
+        volume_expansion_3bar=False, distance_to_ema50=0.05,
         swing_highs=((50, 115.0), (100, 110.0), (150, 105.0)),
         swing_lows=((60, 100.0), (110, 99.0), (160, 100.0)),
     )
@@ -447,19 +480,35 @@ def test_state_trend_on_strong_uptrend_no_base():
 
 
 def test_state_breakout_on_cross_pivot_with_volume():
+    # D-S29: BREAKOUT now gates on volume_expansion_3bar rather than
+    # the single-bar volume_spike.
     t = replace(
         _baseline_tech(),
         distance_to_pivot=0.01, range_20d=0.08, range_5d_norm=0.09,
-        volume_spike=True, atr_expanding=False, distance_to_ema50=0.06,
+        volume_expansion_3bar=True, atr_expanding=False,
+        distance_to_ema50=0.06,
     )
     assert vs._detect_state(t, 0.50, _parts()) == "BREAKOUT"
+
+
+def test_state_breakout_rejects_single_bar_spike_without_3bar_confirmation():
+    """D-S29: a lone volume_spike on the last bar, without a 3-bar mean
+    expansion, must no longer trigger BREAKOUT."""
+    t = replace(
+        _baseline_tech(),
+        distance_to_pivot=0.01, range_20d=0.08, range_5d_norm=0.09,
+        volume_spike=True, volume_expansion_3bar=False,
+        atr_expanding=False, distance_to_ema50=0.06,
+    )
+    assert vs._detect_state(t, 0.50, _parts()) != "BREAKOUT"
 
 
 def test_state_extended_on_post_breakout_stretch():
     t = replace(
         _baseline_tech(),
         distance_to_pivot=0.08, range_20d=0.10, range_5d_norm=0.12,
-        volume_spike=True, atr_expanding=True, distance_to_ema50=0.20,
+        volume_expansion_3bar=True, atr_expanding=True,
+        distance_to_ema50=0.20,
     )
     # EXTENDED must win over BREAKOUT because of priority ordering.
     assert vs._detect_state(t, 0.50, _parts()) == "EXTENDED"

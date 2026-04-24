@@ -1415,3 +1415,62 @@ rally couldn't be re-joined. Two targeted changes:
   styling for EARLY_READY on the TUI, or re-tuning the CONTRACTING gates
   — the EARLY_READY band sits entirely above CONTRACTING's floor so no
   compensating change is needed there.
+
+
+### D-S29. BREAKOUT confirmation — 3-bar volume expansion, not single bar
+- **Decision:** Switch the `BREAKOUT` branch of `_detect_state` from the
+  single-bar `volume_spike` gate to a new 3-bar average gate,
+  `volume_expansion_3bar`. The feature is defined as
+  `mean(volumes[-3:]) ≥ 1.3 × avg_volume_20d`. `volume_spike` (last bar
+  only, 1.5× avg20) is retained as a separate feature for any future
+  single-day-spike use case and for backwards compatibility with callers
+  that introspect the dataclass.
+- **Rationale:** a single loud volume bar — a fund fat-fingering an
+  order, an F&O expiry flush, a block trade — is routinely enough to
+  satisfy `vol[-1] ≥ 1.5 × avg20` on a name that otherwise shows no
+  institutional pressure. Combined with the BREAKOUT branch's other
+  conditions (crossed pivot + 5-bar range > 20-bar range), this produced
+  false `BREAKOUT` classifications on the day of the spike that
+  disappeared the next scan. Averaging over three bars forces the
+  confirmation to persist through the next-day fade, which is the
+  standard institutional accumulation pattern.
+- **Threshold choices:**
+  - `1.3×` on a 3-bar mean is stricter than it looks: an even
+    distribution at 1.3× across three bars is equivalent to requiring
+    each bar to beat the 20d average meaningfully. A single 1.9× bar
+    surrounded by two 1.0× bars yields a 3-bar mean of 1.3× — the
+    threshold is deliberately set so a lone spike cannot carry the
+    signal alone, a reinforcing bar on either side is required.
+  - `3 bars` matches the O'Neil / IBD "follow-through" convention used
+    for index breakouts; on individual names the accumulation typically
+    shows as 2–3 consecutive above-average bars.
+- **Code changes:**
+  - `scanner/vcp/features.py`:
+    - New field `volume_expansion_3bar: bool | None` on
+      `TechnicalFeatures`.
+    - Computed in `compute_technical_features` when `n ≥ 3` and
+      `avg_volume_20d > 0`.
+    - `volume_spike` field and computation untouched.
+  - `scanner/vcp/scorer.py`: BREAKOUT branch gates on
+    `t.volume_expansion_3bar is True` instead of `t.volume_spike is True`.
+- **Tests (3 new, 53 in `test_scanner_vcp.py` / 283 total):**
+  - `test_volume_expansion_3bar_true_when_last_3_avg_over_threshold` —
+    three 140k bars against a 100k baseline → True.
+  - `test_volume_expansion_3bar_false_on_single_bar_spike_only` — lone
+    160k bar trips `volume_spike` but fails the 3-bar mean gate.
+  - `test_state_breakout_rejects_single_bar_spike_without_3bar_confirmation`
+    — end-to-end: `volume_spike=True, volume_expansion_3bar=False` no
+    longer returns `"BREAKOUT"`.
+  - Baseline fixture (`_baseline_tech`) and the existing BREAKOUT /
+    EXTENDED tests updated to carry `volume_expansion_3bar` where the
+    scenario requires confirmation.
+- **Compatibility:**
+  - No SQLite DDL change; `volume_spike` remains in the dataclass and
+    was never persisted as a column.
+  - In-memory callers that constructed `TechnicalFeatures` directly
+    (currently: only tests) must supply `volume_expansion_3bar`. No
+    production callers construct the dataclass manually.
+- **Out of scope:** sector-relative volume gates, pre-market / closing
+  auction volume attribution, and weighting the 3-bar mean by body size
+  (green vs. red bars) — those belong to a later ADR focused on
+  absorption vs. distribution distinction.

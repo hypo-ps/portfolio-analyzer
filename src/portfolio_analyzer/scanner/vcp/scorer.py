@@ -306,10 +306,14 @@ def _detect_state(
             and t.distance_to_ema50 > STATE_EXTENDED_EMA50_DIST):
         return "EXTENDED"
 
-    # BREAKOUT: crossed pivot on volume spike with 5-day range expansion.
+    # BREAKOUT (D-S29): crossed pivot with 5-day range expansion, confirmed
+    # by a 3-bar volume expansion (mean(vol[-3:]) ≥ 1.3× avg20). Using a
+    # 3-bar window avoids false triggers from a single noisy high-volume
+    # bar; the 1.3× multiplier is lower than `volume_spike`'s 1.5× because
+    # it's now an averaged signal.
     if (d is not None and d > 0.0
             and r5 is not None and r20 is not None and r5 > r20
-            and t.volume_spike is True):
+            and t.volume_expansion_3bar is True):
         return "BREAKOUT"
 
     # READY: coiled just below (or at) pivot, pivot tight, std collapsed.

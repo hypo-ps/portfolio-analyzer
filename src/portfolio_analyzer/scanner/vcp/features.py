@@ -56,6 +56,7 @@ class TechnicalFeatures:
     volume_slope_20d: float | None
     atr_expanding: bool | None
     volume_spike: bool | None
+    volume_expansion_3bar: bool | None
     distance_to_ema50: float | None
     # Last-3 swing structure (higher-lows, contracting ranges)
     swing_highs: tuple[tuple[int, float], ...]
@@ -287,6 +288,14 @@ def compute_technical_features(
     if avg_volume_20d is not None and avg_volume_20d > 0:
         volume_spike = bool(float(volumes[-1]) >= 1.5 * avg_volume_20d)
 
+    # 3-bar volume expansion (D-S29): mean of last 3 bars ≥ 1.3× the 20d avg.
+    # Used by the BREAKOUT branch in place of the single-bar volume_spike so a
+    # lone noisy bar cannot drive a BREAKOUT classification by itself.
+    volume_expansion_3bar: bool | None = None
+    if avg_volume_20d is not None and avg_volume_20d > 0 and n >= 3:
+        recent3 = float(volumes[-3:].mean())
+        volume_expansion_3bar = bool(recent3 >= 1.3 * avg_volume_20d)
+
     # Distance from EMA50 (decimal, signed)
     distance_to_ema50: float | None = None
     if ema50 is not None and ema50 > 0:
@@ -321,6 +330,7 @@ def compute_technical_features(
         volume_slope_20d=volume_slope_20d,
         atr_expanding=atr_expanding,
         volume_spike=volume_spike,
+        volume_expansion_3bar=volume_expansion_3bar,
         distance_to_ema50=distance_to_ema50,
         swing_highs=swing_highs,
         swing_lows=swing_lows,
