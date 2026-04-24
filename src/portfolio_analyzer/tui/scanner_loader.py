@@ -10,6 +10,7 @@ from portfolio_analyzer.scanner.db import default_db_path, init_schema, open_db
 
 
 DASH_DECISIONS_DEFAULT = ("BUY_ALERT", "WATCHLIST")
+DASH_DECISIONS_ALL = ("BUY_ALERT", "WATCHLIST", "IGNORE", "SKIP", "REJECT")
 
 
 @dataclass(frozen=True)
@@ -79,8 +80,7 @@ def _benchmark_ret50(conn: sqlite3.Connection, td: dt.date) -> float | None:
 def _load_rows(
     conn: sqlite3.Connection, td: dt.date, include_rejects: bool,
 ) -> list[CandidateRow]:
-    decisions = ("BUY_ALERT", "WATCHLIST", "REJECT") if include_rejects \
-        else DASH_DECISIONS_DEFAULT
+    decisions = DASH_DECISIONS_ALL if include_rejects else DASH_DECISIONS_DEFAULT
     placeholders = ",".join("?" for _ in decisions)
     sql = f"""
         SELECT

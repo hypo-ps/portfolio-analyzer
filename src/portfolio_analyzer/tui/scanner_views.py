@@ -86,15 +86,18 @@ def summary_markup(data: DashboardData) -> str:
     counts = data.universe_counts
     buy = counts.get("BUY_ALERT", 0)
     watch = counts.get("WATCHLIST", 0)
+    ign = counts.get("IGNORE", 0)
+    skp = counts.get("SKIP", 0)
     rej = counts.get("REJECT", 0)
     bench = data.benchmark_return_50d
     bench_str = _fmt_pct(bench, signed=True) if bench is not None else "n/a"
     shown = len(data.rows)
-    mode = "+REJECTs" if data.include_rejects else "WATCHLIST + BUY_ALERT"
+    mode = "+all" if data.include_rejects else "WATCHLIST + BUY_ALERT"
     lines = [
         f"[b]Trade date[/]    {data.trade_date.isoformat()}",
         f"[b]Showing[/]       {shown} rows ({mode})",
-        f"[b]Totals[/]        BUY_ALERT={buy}  WATCHLIST={watch}  REJECT={rej}",
+        f"[b]Totals[/]        BUY_ALERT={buy}  WATCHLIST={watch}  "
+        f"IGNORE={ign}  SKIP={skp}  REJECT={rej}",
         f"[b]Bench ret50[/]   {bench_str}   ([i]NIFTY 500, 50 trading days[/])",
         f"[b]DB[/]            {data.db_path}",
     ]

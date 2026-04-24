@@ -435,7 +435,8 @@ def scanner_fundamentals_ingest(
 @click.option("--limit", type=int, default=None,
               help="Scan at most N symbols from the universe.")
 @click.option("--store-rejects", is_flag=True, default=False,
-              help="Persist REJECT rows too (default: WATCHLIST/BUY_ALERT only).")
+              help="Persist REJECT (stage-1/2 FAIL) rows too. "
+                   "IGNORE/SKIP are stored regardless.")
 @_db_option
 def scanner_vcp_scan(
     date_str: str | None, symbols: tuple[str, ...], limit: int | None,
@@ -503,7 +504,8 @@ def scanner_index_ingest(index_symbol: str, days: int, db_path: Path | None) -> 
 @click.option("--date", "date_str", type=str, default=None,
               help="Trade date to view (YYYY-MM-DD). Default: latest scan.")
 @click.option("--include-rejects", is_flag=True, default=False,
-              help="Include REJECT rows if present (default WATCHLIST + BUY_ALERT).")
+              help="Include IGNORE/SKIP/REJECT rows "
+                   "(default WATCHLIST + BUY_ALERT).")
 @_db_option
 def scanner_dash(
     date_str: str | None, include_rejects: bool, db_path: Path | None,

@@ -11,7 +11,7 @@ Reads the latest (or ``--date``) row set from ``vcp_candidates`` joined with
 Key bindings:
 - ``q`` quit
 - ``s`` sort table by the currently-cursored column
-- ``r`` toggle include-rejects and reload
+- ``r`` toggle include-all (IGNORE/SKIP/REJECT) and reload
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class ScannerDashApp(App):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
-        ("r", "toggle_rejects", "Toggle rejects"),
+        ("r", "toggle_rejects", "Toggle all"),
         ("s", "sort_cursor", "Sort by column"),
     ]
 
